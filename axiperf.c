@@ -22,6 +22,7 @@
 #include <rte_cycles.h>
 #include <rte_byteorder.h>
 #include <rte_ether.h>
+#include <rte_hexdump.h>
 
 #define MAX_PORTS   8
 #define ID_SPACE    512
@@ -37,8 +38,11 @@
 #define RX_POOL_N   16383
 #define TX_POOL_N   8191
 #define POOL_CACHE  256
-#define HIST_NS     50          /* 直方图 50ns 一档 */
-#define HIST_N      4000        /* 覆盖 0~200us */
+#define HIST_NS     50          /* 细档：50ns 一档，覆盖 0~200us */
+#define HIST_N      4000
+#define HIST2_US    100         /* 粗档：100us 一档，覆盖 200us~100ms */
+#define HIST2_N     1000
+#define SLOW_NS     200000      /* RTT > 200us 计为 slow */
 #define MAX_BURST   64
 
 enum { VC_AW = 0, VC_AR = 1, VC_B = 2, VC_R = 3 };
@@ -52,15 +56,18 @@ static int   g_pack = 2;              /* 每请求包事务数 */
 static int   g_beats = 4;             /* 每事务拍数 (awlen/arlen+1) */
 static int   g_burst = 32;
 static int   g_time = 0;              /* 0 = 直到 Ctrl-C */
+static int   g_vid = 0;
+static bool  g_split = true;           /* sender：每条流收发分核 */               /* VLAN ID，过交换机时设为交换机上的 VLAN */
 static struct rte_ether_addr g_dmac[MAX_PORTS];
 static volatile bool g_quit;
 
 /* ---------------- 每端口状态 ---------------- */
 struct port_stat {
 	uint64_t tx_pkts, tx_wire_bytes, rx_pkts, rx_wire_bytes;
-	uint64_t txn_done, data_bytes, err;
-	uint64_t hist[HIST_N];
-	uint64_t rtt_max_ns;
+	uint64_t txn_done, data_bytes, err, ign, pcpx, dumped;
+	uint64_t hist[HIST_N], hist2[HIST2_N];
+	uint64_t rtt_max_ns, rtt_sum_ns, slow;
+	uint64_t busy_cyc, rx_hits;          /* 有活干的循环耗费的周期；rx_burst 非空次数 */
 } __rte_cache_aligned;
 
 struct port_ctx {
@@ -69,7 +76,13 @@ struct port_ctx {
 	struct rte_mempool *rx_pool;
 	struct rte_mempool *tmpl_pool;    /* 预填模板：sender 请求 / reflector 读响应 */
 	uint16_t tmpl_len;                /* 模板满载长度 */
-	struct port_stat st;
+	struct port_stat st;                  /* RX 核（或单核模式）写 */
+	struct port_stat st_tx;               /* 分核模式下 TX 核写，避免伪共享 */
+	/* 分核模式：TX 核与 RX 核共享的在途表（单生产者 / 单消费者） */
+	uint64_t ts[ID_SPACE];
+	uint8_t  outst[ID_SPACE];
+	uint64_t tx_txn __rte_cache_aligned;  /* TX 核写：累计发出事务数 */
+	uint64_t done_txn __rte_cache_aligned;/* RX 核写：累计完成事务数 */
 } __rte_cache_aligned;
 
 static struct port_ctx g_ctx[MAX_PORTS];
@@ -90,11 +103,33 @@ static void write_eth(uint8_t *p, const struct rte_ether_addr *d, const struct r
 {
 	memcpy(p, d, 6); memcpy(p + 6, s, 6);
 	p[12] = 0x81; p[13] = 0x00;
-	put_be16(p + 14, (uint16_t)(vc << 13));   /* DEI=0, VID=0 */
+	put_be16(p + 14, (uint16_t)((vc << 13) | (g_vid & 0xFFF)));   /* DEI=0 */
 	put_be16(p + 16, len);
 }
 
 static inline uint16_t frame_wire(uint16_t len) { return (uint16_t)((len < 60 ? 60 : len) + 4 + 20); } /* +FCS +前导码/IFG */
+
+/* 识别 AXI 帧：802.1Q 且 tag 后为 802.3 Length（≤1500）。返回 0=AXI，1=非 AXI（静默忽略），2=AXI 但长度越界 */
+static inline int classify(const uint8_t *f, uint32_t pkt_len, uint16_t *plen)
+{
+	if (pkt_len < HDR_LEN + 4 || f[12] != 0x81 || f[13] != 0x00) return 1;
+	*plen = get_be16(f + 16);
+	if (*plen > 1500) return 1;                           /* 是 EtherType（如 VLAN 内的 IPv4/DHCP），不是我们的帧 */
+	if (*plen < 4 || (uint32_t)(HDR_LEN + *plen) > pkt_len) return 2;
+	return 0;
+}
+
+/* 前 5 个异常包打印原因与十六进制，便于定位 */
+static void dump_bad(struct port_stat *st, uint16_t port, const char *why, struct rte_mbuf *m)
+{
+	if (st->dumped >= 5) return;
+	st->dumped++;
+	printf("[port %u] bad frame: %s  pkt_len=%u  ol_flags=0x%lx%s  vlan_tci=0x%04x\n", port, why, m->pkt_len,
+	       (unsigned long)m->ol_flags, (m->ol_flags & RTE_MBUF_F_RX_VLAN_STRIPPED) ? " (VLAN STRIPPED by NIC)" : "",
+	       m->vlan_tci);
+	rte_hexdump(stdout, "first 64B", rte_pktmbuf_mtod(m, void *), m->data_len < 64 ? m->data_len : 64);
+	fflush(stdout);
+}
 
 /* ---------------- 模板 ---------------- */
 struct tmpl { uint8_t buf[2048]; uint16_t len; };
@@ -146,7 +181,9 @@ static inline void hist_add(struct port_stat *s, uint64_t cyc)
 {
 	uint64_t ns = (cyc * g_ns_mult) >> 20;
 	uint64_t b = ns / HIST_NS;
-	s->hist[b < HIST_N ? b : HIST_N - 1]++;
+	if (b < HIST_N) s->hist[b]++;
+	else { uint64_t b2 = (ns - SLOW_NS) / (HIST2_US * 1000); s->hist2[b2 < HIST2_N ? b2 : HIST2_N - 1]++; s->slow++; }
+	s->rtt_sum_ns += ns;
 	if (ns > s->rtt_max_ns) s->rtt_max_ns = ns;
 }
 
@@ -171,6 +208,8 @@ static int sender_loop(struct port_ctx *c)
 	struct rte_mbuf *tx[MAX_BURST], *rx[MAX_BURST];
 
 	while (!g_quit) {
+		uint64_t t_s = rte_rdtsc();
+		bool did = false;
 		/* ---- 发送：受窗口和 ID 占用约束 ---- */
 		int can = (g_window - inflight) / g_pack;
 		if (can > g_burst) can = g_burst;
@@ -194,6 +233,7 @@ static int sender_loop(struct port_ctx *c)
 				tx[i]->data_len = tx[i]->pkt_len = len;
 			}
 			inflight += n * g_pack;
+			did = true;
 			tx_all(c->port, tx, (uint16_t)n);
 			s->tx_pkts += n;
 			s->tx_wire_bytes += (uint64_t)n * frame_wire(len);
@@ -201,15 +241,21 @@ static int sender_loop(struct port_ctx *c)
 
 		/* ---- 接收响应 ---- */
 		uint16_t nr = rte_eth_rx_burst(c->port, 0, rx, MAX_BURST);
-		if (nr == 0) continue;
+		if (nr == 0) { if (did) s->busy_cyc += rte_rdtsc() - t_s; continue; }
+		s->rx_hits++;
 		uint64_t now = rte_rdtsc();
 		for (uint16_t i = 0; i < nr; i++) {
 			uint8_t *f = rte_pktmbuf_mtod(rx[i], uint8_t *);
-			uint16_t plen = get_be16(f + 16), off = 0;
-			uint8_t vc = f[14] >> 5;
+			uint16_t plen = 0, off = 0;
 			uint8_t *p = f + HDR_LEN;
 			s->rx_pkts++; s->rx_wire_bytes += frame_wire(rx[i]->pkt_len);
-			if ((uint32_t)(HDR_LEN + plen) > rx[i]->pkt_len || f[12] != 0x81 || (vc != VC_B && vc != VC_R)) { s->err++; continue; }
+			int cls = classify(f, rx[i]->pkt_len, &plen);
+			if (cls == 1) { s->ign++; continue; }
+			if (cls == 2) { s->err++; dump_bad(s, c->port, "Length > frame", rx[i]); continue; }
+			uint8_t vc = f[14] >> 5, ft0 = p[0] >> 4;           /* 按 frame_type 分发，PCP 只做核对 */
+			if (ft0 != FT_B && ft0 != FT_R) { s->err++; dump_bad(s, c->port, "unexpected frame_type", rx[i]); continue; }
+			if (vc != (ft0 == FT_B ? VC_B : VC_R)) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", rx[i]); }
+			vc = ft0 == FT_B ? VC_B : VC_R;
 			while (off < plen) {
 				uint32_t w0 = get_be32(p + off), id = (w0 >> 19) & 0x1FF, ft = w0 >> 28, step, data = 0;
 				if (vc == VC_B && ft == FT_B) step = B_RSP;
@@ -221,9 +267,102 @@ static int sender_loop(struct port_ctx *c)
 			}
 		}
 		rte_pktmbuf_free_bulk(rx, nr);
+		s->busy_cyc += rte_rdtsc() - t_s;
 	}
 	return 0;
 }
+
+/* ---------------- sender（收发分核） ---------------- */
+static int sender_tx_loop(struct port_ctx *c)
+{
+	struct port_stat *s = &c->st_tx;
+	uint32_t next_id = 0;
+	const uint16_t len = g_tmpl[c - g_ctx].len;
+	const uint16_t txn_len = g_read ? AR_HDR : AW_HDR + g_beats * BEAT;
+	const uint16_t wire = frame_wire(len);
+	struct rte_mbuf *tx[MAX_BURST];
+
+	while (!g_quit) {
+		uint64_t t_s = rte_rdtsc();
+		uint64_t done = __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE);
+		int can = (int)((uint64_t)g_window - (c->tx_txn - done)) / g_pack;
+		if (can > g_burst) can = g_burst;
+		int n = 0;
+		for (; n < can; n++) {
+			bool ok = true;
+			for (int k = 0; k < g_pack; k++)
+				if (__atomic_load_n(&c->outst[(next_id + n * g_pack + k) & (ID_SPACE - 1)], __ATOMIC_ACQUIRE)) { ok = false; break; }
+			if (!ok) break;
+		}
+		if (n <= 0 || rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) continue;
+		uint64_t now = rte_rdtsc();
+		for (int i = 0; i < n; i++) {
+			uint8_t *p = rte_pktmbuf_mtod(tx[i], uint8_t *) + HDR_LEN;
+			for (int k = 0; k < g_pack; k++, p += txn_len) {
+				uint32_t id = next_id;
+				put_be32(p, g_read ? w0_ar(id) : w0_aw(id));
+				c->ts[id] = now;
+				__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
+				next_id = (next_id + 1) & (ID_SPACE - 1);
+			}
+			tx[i]->data_len = tx[i]->pkt_len = len;
+		}
+		__atomic_store_n(&c->tx_txn, c->tx_txn + (uint64_t)n * g_pack, __ATOMIC_RELEASE);
+		tx_all(c->port, tx, (uint16_t)n);
+		s->tx_pkts += n;
+		s->tx_wire_bytes += (uint64_t)n * wire;
+		s->busy_cyc += rte_rdtsc() - t_s;
+	}
+	return 0;
+}
+
+static int sender_rx_loop(struct port_ctx *c)
+{
+	struct port_stat *s = &c->st;
+	struct rte_mbuf *rx[MAX_BURST];
+
+	while (!g_quit) {
+		uint64_t t_s = rte_rdtsc();
+		uint16_t nr = rte_eth_rx_burst(c->port, 0, rx, MAX_BURST);
+		if (nr == 0) continue;
+		s->rx_hits++;
+		uint64_t now = rte_rdtsc(), done = 0;
+		for (uint16_t i = 0; i < nr; i++) {
+			uint8_t *f = rte_pktmbuf_mtod(rx[i], uint8_t *);
+			uint16_t plen = 0, off = 0;
+			uint8_t *p = f + HDR_LEN;
+			s->rx_pkts++; s->rx_wire_bytes += frame_wire(rx[i]->pkt_len);
+			int cls = classify(f, rx[i]->pkt_len, &plen);
+			if (cls == 1) { s->ign++; continue; }
+			if (cls == 2) { s->err++; dump_bad(s, c->port, "Length > frame", rx[i]); continue; }
+			uint8_t vc = f[14] >> 5, ft0 = p[0] >> 4;
+			if (ft0 != FT_B && ft0 != FT_R) { s->err++; dump_bad(s, c->port, "unexpected frame_type", rx[i]); continue; }
+			if (vc != (ft0 == FT_B ? VC_B : VC_R)) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", rx[i]); }
+			vc = ft0 == FT_B ? VC_B : VC_R;
+			while (off < plen) {
+				uint32_t w0 = get_be32(p + off), id = (w0 >> 19) & 0x1FF, ft = w0 >> 28, step, data = 0;
+				if (vc == VC_B && ft == FT_B) step = B_RSP;
+				else if (vc == VC_R && ft == FT_R) { data = (((w0 >> 17) & 3) + 1) * BEAT; step = R_HDR + data; }
+				else { s->err++; break; }
+				if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) s->err++;
+				else {
+					hist_add(s, now - c->ts[id]);
+					__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
+					done++; s->data_bytes += g_read ? data : (uint64_t)g_beats * BEAT;
+				}
+				off += step;
+			}
+		}
+		s->txn_done += done;
+		__atomic_store_n(&c->done_txn, c->done_txn + done, __ATOMIC_RELEASE);
+		rte_pktmbuf_free_bulk(rx, nr);
+		s->busy_cyc += rte_rdtsc() - t_s;
+	}
+	return 0;
+}
+
+static int worker_tx(void *arg) { return sender_tx_loop(arg); }
+static int worker_rx(void *arg) { return sender_rx_loop(arg); }
 
 /* ---------------- reflector ---------------- */
 static int reflector_loop(struct port_ctx *c)
@@ -232,16 +371,21 @@ static int reflector_loop(struct port_ctx *c)
 	struct rte_mbuf *rx[MAX_BURST], *tx[MAX_BURST * 4];
 
 	while (!g_quit) {
+		uint64_t t_s = rte_rdtsc();
 		uint16_t nr = rte_eth_rx_burst(c->port, 0, rx, MAX_BURST), nt = 0;
 		if (nr == 0) continue;
+		s->rx_hits++;
 		for (uint16_t i = 0; i < nr; i++) {
 			struct rte_mbuf *m = rx[i];
 			uint8_t *f = rte_pktmbuf_mtod(m, uint8_t *);
-			uint16_t plen = get_be16(f + 16);
-			uint8_t vc = f[14] >> 5;
+			uint16_t plen = 0;
 			s->rx_pkts++; s->rx_wire_bytes += frame_wire(m->pkt_len);
-			if ((uint32_t)(HDR_LEN + plen) > m->pkt_len || f[12] != 0x81) { s->err++; rte_pktmbuf_free(m); continue; }
-
+			int cls = classify(f, m->pkt_len, &plen);
+			if (cls == 1) { s->ign++; rte_pktmbuf_free(m); continue; }
+			if (cls == 2) { s->err++; dump_bad(s, c->port, "Length > frame", m); rte_pktmbuf_free(m); continue; }
+			uint8_t ft0 = f[HDR_LEN] >> 4, pcp = f[14] >> 5, vc;     /* 按 frame_type 分发，PCP 只做核对 */
+			vc = (ft0 == FT_WRFULL || ft0 == FT_WR) ? VC_AW : (ft0 == FT_AR ? VC_AR : 0xFF);
+			if (vc != 0xFF && pcp != vc) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
 			if (vc == VC_AW) {                         /* 写：原地改写为 k 个 wrRsp */
 				uint32_t ids[16]; int k = 0; uint16_t off = 0;
 				while (off < plen && k < 16) {
@@ -280,11 +424,12 @@ static int reflector_loop(struct port_ctx *c)
 				for (uint16_t j = nt0; j < nt; j++)
 					write_eth(rte_pktmbuf_mtod(tx[j], uint8_t *), &d, &sm, VC_R, (uint16_t)(tx[j]->pkt_len - HDR_LEN));
 				rte_pktmbuf_free(m);
-			} else { s->err++; rte_pktmbuf_free(m); }
+			} else { s->err++; dump_bad(s, c->port, "unexpected frame_type", m); rte_pktmbuf_free(m); }
 		}
 		for (uint16_t j = 0; j < nt; j++) s->tx_wire_bytes += frame_wire(tx[j]->pkt_len);
 		s->tx_pkts += nt;
 		tx_all(c->port, tx, nt);
+		s->busy_cyc += rte_rdtsc() - t_s;
 	}
 	return 0;
 }
@@ -327,29 +472,42 @@ static void port_init(uint16_t pi)
 }
 
 /* ---------------- 统计输出 ---------------- */
-static uint64_t pct(const uint64_t *h, uint64_t total, double q)
+static uint64_t pct(const struct port_stat *st, uint64_t total, double q)
 {
 	uint64_t target = (uint64_t)(total * q), acc = 0;
-	for (int i = 0; i < HIST_N; i++) { acc += h[i]; if (acc > target) return (uint64_t)(i + 1) * HIST_NS; }
-	return (uint64_t)HIST_N * HIST_NS;
+	for (int i = 0; i < HIST_N; i++) { acc += st->hist[i]; if (acc > target) return (uint64_t)(i + 1) * HIST_NS; }
+	for (int i = 0; i < HIST2_N; i++) { acc += st->hist2[i]; if (acc > target) return SLOW_NS + (uint64_t)(i + 1) * HIST2_US * 1000; }
+	return SLOW_NS + (uint64_t)HIST2_N * HIST2_US * 1000;
 }
 
-static void print_stats(struct port_stat *prev, double dt)
+static void print_stats(struct port_stat *prev, struct port_stat *prev_tx, double dt, bool final)
 {
-	printf("\nport  txMpps  txWireG  rxMpps  rxWireG  txn/sM  dataG   p50us   p99us  p999us  maxus  err   imissed nombuf\n");
+	static int line;
+	if (final || line++ % 20 == 0)
+		printf("%sport txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts   err   ign  pcpx imissed nombuf\n",
+		       final ? "---- total/avg ----\n" : "");
 	for (uint16_t i = 0; i < g_nb_ports; i++) {
-		struct port_stat *s = &g_ctx[i].st, *o = &prev[i];
+		struct port_stat *st = &g_ctx[i].st, *o = &prev[i], *tt = &g_ctx[i].st_tx, *ot = &prev_tx[i];
 		struct rte_eth_stats es; rte_eth_stats_get(i, &es);
-		uint64_t tot = 0; for (int b = 0; b < HIST_N; b++) tot += s->hist[b];
-		printf("%-4u  %6.2f  %7.1f  %6.2f  %7.1f  %6.2f  %6.1f  %6.2f  %6.2f  %6.2f  %6.2f  %-5lu %-7lu %lu\n", i,
-		       (s->tx_pkts - o->tx_pkts) / dt / 1e6, (s->tx_wire_bytes - o->tx_wire_bytes) * 8 / dt / 1e9,
-		       (s->rx_pkts - o->rx_pkts) / dt / 1e6, (s->rx_wire_bytes - o->rx_wire_bytes) * 8 / dt / 1e9,
-		       (s->txn_done - o->txn_done) / dt / 1e6, (s->data_bytes - o->data_bytes) * 8 / dt / 1e9,
-		       tot ? pct(s->hist, tot, 0.5) / 1e3 : 0, tot ? pct(s->hist, tot, 0.99) / 1e3 : 0,
-		       tot ? pct(s->hist, tot, 0.999) / 1e3 : 0, s->rtt_max_ns / 1e3,
-		       (unsigned long)s->err, (unsigned long)es.imissed, (unsigned long)es.rx_nombuf);
-		o->tx_pkts = s->tx_pkts; o->tx_wire_bytes = s->tx_wire_bytes; o->rx_pkts = s->rx_pkts;
-		o->rx_wire_bytes = s->rx_wire_bytes; o->txn_done = s->txn_done; o->data_bytes = s->data_bytes;
+		uint64_t txp = st->tx_pkts + tt->tx_pkts, otxp = o->tx_pkts + ot->tx_pkts;
+		uint64_t txw = st->tx_wire_bytes + tt->tx_wire_bytes, otxw = o->tx_wire_bytes + ot->tx_wire_bytes;
+		uint64_t bT = tt->busy_cyc - ot->busy_cyc, bR = st->busy_cyc - o->busy_cyc;
+		uint64_t pk = (txp - otxp) + (st->rx_pkts - o->rx_pkts);
+		uint64_t tot = st->txn_done;
+		/* 单核模式下全部计在 st 里：busyT 显示 '-' 的等价值 0 */
+		printf("%-4u %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %5lu %5lu %5lu %7lu %6lu\n", i,
+		       (txp - otxp) / dt / 1e6, (txw - otxw) * 8 / dt / 1e9,
+		       (st->rx_pkts - o->rx_pkts) / dt / 1e6, (st->rx_wire_bytes - o->rx_wire_bytes) * 8 / dt / 1e9,
+		       (st->txn_done - o->txn_done) / dt / 1e6, (st->data_bytes - o->data_bytes) * 8 / dt / 1e9,
+		       tot ? st->rtt_sum_ns / 1e3 / tot : 0,
+		       tot ? pct(st, tot, 0.5) / 1e3 : 0, tot ? pct(st, tot, 0.99) / 1e3 : 0,
+		       tot ? pct(st, tot, 0.999) / 1e3 : 0, st->rtt_max_ns / 1e3, (unsigned long)st->slow,
+		       bT * 100.0 / (dt * g_hz), bR * 100.0 / (dt * g_hz),
+		       pk ? (double)(bT + bR) / pk : 0,
+		       (st->rx_hits - o->rx_hits) ? (double)(st->rx_pkts - o->rx_pkts) / (st->rx_hits - o->rx_hits) : 0,
+		       (unsigned long)txp, (unsigned long)st->rx_pkts, (unsigned long)st->err, (unsigned long)st->ign,
+		       (unsigned long)st->pcpx, (unsigned long)es.imissed, (unsigned long)es.rx_nombuf);
+		if (!final) { *o = *st; *ot = *tt; }
 	}
 	fflush(stdout);
 }
@@ -358,14 +516,14 @@ static void print_stats(struct port_stat *prev, double dt)
 static void usage(void)
 {
 	printf("axiperf [EAL] -- --mode sender|reflector [--op write|read] [--window N] [--pack N]\n"
-	       "        [--beats N] [--burst N] [--time SEC] [--dmac PORT,xx:xx:xx:xx:xx:xx]\n");
+	       "        [--beats N] [--burst N] [--time SEC] [--dmac PORT,xx:xx:xx:xx:xx:xx] [--vid N] [--nosplit]\n");
 }
 
 static void parse_args(int argc, char **argv)
 {
 	static struct option lo[] = {
 		{"mode", 1, 0, 'm'}, {"op", 1, 0, 'o'}, {"window", 1, 0, 'w'}, {"pack", 1, 0, 'p'},
-		{"beats", 1, 0, 'b'}, {"burst", 1, 0, 'u'}, {"time", 1, 0, 't'}, {"dmac", 1, 0, 'd'}, {0, 0, 0, 0}};
+		{"beats", 1, 0, 'b'}, {"burst", 1, 0, 'u'}, {"time", 1, 0, 't'}, {"dmac", 1, 0, 'd'}, {"vid", 1, 0, 'v'}, {"nosplit", 0, 0, 'n'}, {0, 0, 0, 0}};
 	int o;
 	for (int i = 0; i < MAX_PORTS; i++) {           /* 默认 DMAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -380,6 +538,8 @@ static void parse_args(int argc, char **argv)
 		case 'b': g_beats = atoi(optarg); break;
 		case 'u': g_burst = atoi(optarg); break;
 		case 't': g_time = atoi(optarg); break;
+		case 'v': g_vid = atoi(optarg) & 0xFFF; break;
+		case 'n': g_split = false; break;
 		case 'd': {
 			int pi = atoi(optarg); char *mac = strchr(optarg, ',');
 			if (!mac || pi >= MAX_PORTS || rte_ether_unformat_addr(mac + 1, &g_dmac[pi]) < 0) { usage(); exit(1); }
@@ -407,28 +567,34 @@ int main(int argc, char **argv)
 
 	g_nb_ports = rte_eth_dev_count_avail();
 	if (g_nb_ports == 0 || g_nb_ports > MAX_PORTS) rte_exit(EXIT_FAILURE, "ports: %u\n", g_nb_ports);
-	if (rte_lcore_count() < (unsigned)g_nb_ports + 1) rte_exit(EXIT_FAILURE, "需要 %u 个 lcore（1 统计 + 每端口 1 个）\n", g_nb_ports + 1);
+	unsigned per = (g_sender && g_split) ? 2 : 1;
+	if (rte_lcore_count() < g_nb_ports * per + 1)
+		rte_exit(EXIT_FAILURE, "需要 %u 个 lcore（1 统计 + 每端口 %u 个）\n", g_nb_ports * per + 1, per);
 
 	for (uint16_t i = 0; i < g_nb_ports; i++) port_init(i);
-	printf("mode=%s op=%s window=%d pack=%d beats=%d burst=%d ports=%u\n", g_sender ? "sender" : "reflector",
-	       g_read ? "read" : "write", g_window, g_pack, g_beats, g_burst, g_nb_ports);
+	printf("mode=%s op=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u\n", g_sender ? "sender" : "reflector",
+	       g_read ? "read" : "write", g_window, g_pack, g_beats, g_burst, g_vid, g_sender && g_split, g_nb_ports);
 
-	unsigned lc; uint16_t pi = 0;
+	unsigned lc, wi = 0;
 	RTE_LCORE_FOREACH_WORKER(lc) {
-		if (pi >= g_nb_ports) break;
-		rte_eal_remote_launch(worker, &g_ctx[pi++], lc);
+		if (wi >= g_nb_ports * per) break;
+		struct port_ctx *c = &g_ctx[wi / per];
+		if (per == 2) rte_eal_remote_launch((wi % 2) ? worker_rx : worker_tx, c, lc);   /* 端口 i：TX 核在前，RX 核在后 */
+		else rte_eal_remote_launch(worker, c, lc);
+		wi++;
 	}
 
-	static struct port_stat prev[MAX_PORTS];
+	static struct port_stat prev[MAX_PORTS], prev_tx[MAX_PORTS];
 	uint64_t t0 = rte_get_timer_cycles(), last = t0, hz = rte_get_timer_hz();
 	while (!g_quit) {
 		rte_delay_ms(1000);
 		uint64_t now = rte_get_timer_cycles();
-		print_stats(prev, (double)(now - last) / hz);
+		print_stats(prev, prev_tx, (double)(now - last) / hz, false);
 		last = now;
 		if (g_time && now - t0 >= (uint64_t)g_time * hz) g_quit = true;
 	}
 	rte_eal_mp_wait_lcore();
+	{ static struct port_stat zero[MAX_PORTS], zero_tx[MAX_PORTS]; print_stats(zero, zero_tx, (double)(rte_get_timer_cycles() - t0) / hz, true); }
 	for (uint16_t i = 0; i < g_nb_ports; i++) { rte_eth_dev_stop(i); rte_eth_dev_close(i); }
 	rte_eal_cleanup();
 	return 0;
