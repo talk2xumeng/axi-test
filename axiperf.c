@@ -24,6 +24,8 @@
 #include <rte_ether.h>
 #include <rte_hexdump.h>
 #include <rte_pdump.h>
+#include <rte_spinlock.h>
+#include <time.h>
 
 #define MAX_PORTS   8
 #define MAX_FLOWS   32          /* 所有端口合计的流数上限 */
@@ -62,7 +64,9 @@ static int   g_time = 0;              /* 0 = 直到 Ctrl-C */
 static int   g_vid = 0;
 static bool  g_split = true;           /* sender：每条流收发分核 */
 static int   g_dump = 0;
-static int   g_fpp = 1;               /* 每端口流数：每条流 = 独立 MAC + 独立队列对 + 独立 ID 空间 */              /* 打印前 N 个发出 / 收到的 AXI 帧（十六进制） */               /* VLAN ID，过交换机时设为交换机上的 VLAN */
+static int   g_fpp = 1;
+static const char *g_pcap_path;        /* 抓包模式：把收/发的 AXI 帧写入 pcap 文件 */
+static uint64_t g_pcap_left = 1000;     /* 最多写多少帧 */               /* 每端口流数：每条流 = 独立 MAC + 独立队列对 + 独立 ID 空间 */              /* 打印前 N 个发出 / 收到的 AXI 帧（十六进制） */               /* VLAN ID，过交换机时设为交换机上的 VLAN */
 static struct rte_ether_addr g_dmac[MAX_PORTS];
 static volatile bool g_quit;
 
@@ -156,6 +160,42 @@ static inline void dump_frame(uint64_t *cnt, uint16_t port, const char *dir, str
 	fflush(stdout);
 }
 
+/* ---------------- 抓包模式（pcap，纳秒时间戳） ---------------- */
+static FILE *g_pcap;
+static rte_spinlock_t g_pcap_lock = RTE_SPINLOCK_INITIALIZER;
+static uint64_t g_pcap_written;
+
+static void pcap_open(const char *path)
+{
+	g_pcap = fopen(path, "wb");
+	if (!g_pcap) rte_exit(EXIT_FAILURE, "无法创建 %s\n", path);
+	struct { uint32_t magic; uint16_t vmaj, vmin; int32_t tz; uint32_t sig, snap, link; } gh =
+		{ 0xa1b23c4d, 2, 4, 0, 0, 65535, 1 };          /* 纳秒 pcap，以太网 */
+	fwrite(&gh, sizeof(gh), 1, g_pcap);
+}
+
+static void pcap_write(struct rte_mbuf *m)
+{
+	if (!g_pcap || __atomic_load_n(&g_pcap_left, __ATOMIC_RELAXED) == 0) return;
+	struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+	struct { uint32_t sec, nsec, caplen, len; } rh =
+		{ (uint32_t)ts.tv_sec, (uint32_t)ts.tv_nsec, m->data_len, m->pkt_len };
+	rte_spinlock_lock(&g_pcap_lock);
+	if (g_pcap_left) {
+		fwrite(&rh, sizeof(rh), 1, g_pcap);
+		fwrite(rte_pktmbuf_mtod(m, void *), m->data_len, 1, g_pcap);
+		g_pcap_left--; g_pcap_written++;
+	}
+	rte_spinlock_unlock(&g_pcap_lock);
+}
+
+/* 收发路径上的旁路点：--dump 打印十六进制，--pcap 写文件 */
+static inline void tap(uint64_t *cnt, uint16_t port, const char *dir, struct rte_mbuf *m)
+{
+	if (g_dump) dump_frame(cnt, port, dir, m);
+	if (g_pcap) pcap_write(m);
+}
+
 /* ---------------- 模板 ---------------- */
 struct tmpl { uint8_t buf[2048]; uint16_t len; };
 static struct tmpl g_tmpl[MAX_FLOWS];
@@ -189,11 +229,8 @@ static void build_tmpl(uint16_t fi)
 		}
 		write_eth(t->buf, &c->dmac, &c->mac, VC_AR, (uint16_t)(p - t->buf - HDR_LEN));
 	} else {                              /* reflector 读响应：最多 8 个 (R 头 + 1 拍)，按需截断 */
-		for (int k = 0; k < MAX_BEATS; k++) {
-			put_be32(p, w0_r(0, 1));
-			memset(p + R_HDR, 0x5A, BEAT);
-			p += R_HDR + BEAT;
-		}
+		memset(p, 0x5A, MAX_BEATS * (R_HDR + BEAT));   /* 只填数据；R 头在发送时按实际位置写入，避免数据区残留模板头 */
+		p += MAX_BEATS * (R_HDR + BEAT);
 		/* 以太头在发送时按请求改写 */
 	}
 	t->len = (uint16_t)(p - t->buf);
@@ -256,7 +293,7 @@ static int sender_loop(struct port_ctx *c)
 					next_id = (next_id + 1) & (ID_SPACE - 1);
 				}
 				tx[i]->data_len = tx[i]->pkt_len = len;
-				if (g_dump) dump_frame(&s->dump_tx, c->port, "TX", tx[i]);
+				if (g_dump || g_pcap) tap(&s->dump_tx, c->port, "TX", tx[i]);
 			}
 			inflight += n * g_pack;
 			did = true;
@@ -282,7 +319,7 @@ static int sender_loop(struct port_ctx *c)
 			if (ft0 != FT_B && ft0 != FT_R) { s->err++; dump_bad(s, c->port, "unexpected frame_type", rx[i]); continue; }
 			if (vc != (ft0 == FT_B ? VC_B : VC_R)) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", rx[i]); }
 			vc = ft0 == FT_B ? VC_B : VC_R;
-			if (g_dump) dump_frame(&s->dump_rx, c->port, "RX", rx[i]);
+			if (g_dump || g_pcap) tap(&s->dump_rx, c->port, "RX", rx[i]);
 			while (off < plen) {
 				uint32_t w0 = get_be32(p + off), id = (w0 >> 19) & 0x1FF, ft = w0 >> 28, step, data = 0;
 				if (vc == VC_B && ft == FT_B) step = B_RSP;
@@ -333,7 +370,7 @@ static int sender_tx_loop(struct port_ctx *c)
 				next_id = (next_id + 1) & (ID_SPACE - 1);
 			}
 			tx[i]->data_len = tx[i]->pkt_len = len;
-			if (g_dump) dump_frame(&s->dump_tx, c->port, "TX", tx[i]);
+			if (g_dump || g_pcap) tap(&s->dump_tx, c->port, "TX", tx[i]);
 		}
 		__atomic_store_n(&c->tx_txn, c->tx_txn + (uint64_t)n * g_pack, __ATOMIC_RELEASE);
 		tx_all(c->port, c->q, tx, (uint16_t)n);
@@ -367,7 +404,7 @@ static int sender_rx_loop(struct port_ctx *c)
 			if (ft0 != FT_B && ft0 != FT_R) { s->err++; dump_bad(s, c->port, "unexpected frame_type", rx[i]); continue; }
 			if (vc != (ft0 == FT_B ? VC_B : VC_R)) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", rx[i]); }
 			vc = ft0 == FT_B ? VC_B : VC_R;
-			if (g_dump) dump_frame(&s->dump_rx, c->port, "RX", rx[i]);
+			if (g_dump || g_pcap) tap(&s->dump_rx, c->port, "RX", rx[i]);
 			while (off < plen) {
 				uint32_t w0 = get_be32(p + off), id = (w0 >> 19) & 0x1FF, ft = w0 >> 28, step, data = 0;
 				if (vc == VC_B && ft == FT_B) step = B_RSP;
@@ -415,7 +452,7 @@ static int reflector_loop(struct port_ctx *c)
 			uint8_t ft0 = f[HDR_LEN] >> 4, pcp = f[14] >> 5, vc;     /* 按 frame_type 分发，PCP 只做核对 */
 			vc = (ft0 == FT_WRFULL || ft0 == FT_WR) ? VC_AW : (ft0 == FT_AR ? VC_AR : 0xFF);
 			if (vc != 0xFF && pcp != vc) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
-			if (g_dump) dump_frame(&s->dump_rx, c->port, "RX", m);
+			if (g_dump || g_pcap) tap(&s->dump_rx, c->port, "RX", m);
 			if (vc == VC_AW) {                         /* 写：原地改写为 k 个 wrRsp */
 				uint32_t ids[16]; int k = 0; uint16_t off = 0;
 				while (off < plen && k < 16) {
@@ -456,14 +493,14 @@ static int reflector_loop(struct port_ctx *c)
 				rte_pktmbuf_free(m);
 			} else { s->err++; dump_bad(s, c->port, "unexpected frame_type", m); rte_pktmbuf_free(m); }
 			if (nt >= g_burst) {                  /* 每攒够 burst 个响应就先发，降低批处理时延 */
-				for (uint16_t j = 0; j < nt; j++) { s->tx_wire_bytes += frame_wire(tx[j]->pkt_len); if (g_dump) dump_frame(&s->dump_tx, c->port, "TX", tx[j]); }
+				for (uint16_t j = 0; j < nt; j++) { s->tx_wire_bytes += frame_wire(tx[j]->pkt_len); if (g_dump || g_pcap) tap(&s->dump_tx, c->port, "TX", tx[j]); }
 				s->tx_pkts += nt;
 				tx_all(c->port, c->q, tx, nt);
 				nt = 0;
 			}
 		}
 		if (nt) {
-			for (uint16_t j = 0; j < nt; j++) { s->tx_wire_bytes += frame_wire(tx[j]->pkt_len); if (g_dump) dump_frame(&s->dump_tx, c->port, "TX", tx[j]); }
+			for (uint16_t j = 0; j < nt; j++) { s->tx_wire_bytes += frame_wire(tx[j]->pkt_len); if (g_dump || g_pcap) tap(&s->dump_tx, c->port, "TX", tx[j]); }
 			s->tx_pkts += nt;
 			tx_all(c->port, c->q, tx, nt);
 		}
@@ -589,14 +626,14 @@ static void print_stats(struct port_stat *prev, struct port_stat *prev_tx, doubl
 static void usage(void)
 {
 	printf("axiperf [EAL] -- --mode sender|reflector [--op write|read] [--window N] [--pack N]\n"
-	       "        [--beats N] [--burst N] [--time SEC] [--dmac PORT,xx:xx:xx:xx:xx:xx] [--vid N] [--nosplit] [--dump N] [--flows N]\n");
+	       "        [--beats N] [--burst N] [--time SEC] [--dmac PORT,xx:xx:xx:xx:xx:xx] [--vid N] [--nosplit] [--dump N] [--flows N] [--pcap FILE] [--pcap-count N]\n");
 }
 
 static void parse_args(int argc, char **argv)
 {
 	static struct option lo[] = {
 		{"mode", 1, 0, 'm'}, {"op", 1, 0, 'o'}, {"window", 1, 0, 'w'}, {"pack", 1, 0, 'p'},
-		{"beats", 1, 0, 'b'}, {"burst", 1, 0, 'u'}, {"time", 1, 0, 't'}, {"dmac", 1, 0, 'd'}, {"vid", 1, 0, 'v'}, {"nosplit", 0, 0, 'n'}, {"dump", 1, 0, 'x'}, {"flows", 1, 0, 'f'}, {0, 0, 0, 0}};
+		{"beats", 1, 0, 'b'}, {"burst", 1, 0, 'u'}, {"time", 1, 0, 't'}, {"dmac", 1, 0, 'd'}, {"vid", 1, 0, 'v'}, {"nosplit", 0, 0, 'n'}, {"dump", 1, 0, 'x'}, {"flows", 1, 0, 'f'}, {"pcap", 1, 0, 'P'}, {"pcap-count", 1, 0, 'C'}, {0, 0, 0, 0}};
 	int o;
 	for (int i = 0; i < MAX_PORTS; i++) {           /* 默认 DMAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -615,6 +652,8 @@ static void parse_args(int argc, char **argv)
 		case 'n': g_split = false; break;
 		case 'x': g_dump = atoi(optarg); break;
 		case 'f': g_fpp = atoi(optarg); break;
+		case 'P': g_pcap_path = optarg; break;
+		case 'C': g_pcap_left = strtoull(optarg, NULL, 10); break;
 		case 'd': {
 			int pi = atoi(optarg); char *mac = strchr(optarg, ',');
 			if (!mac || pi >= MAX_PORTS || rte_ether_unformat_addr(mac + 1, &g_dmac[pi]) < 0) { usage(); exit(1); }
@@ -637,6 +676,7 @@ int main(int argc, char **argv)
 	if (ret < 0) rte_exit(EXIT_FAILURE, "EAL init failed\n");
 	parse_args(argc - ret, argv + ret);
 	rte_pdump_init();                       /* 允许 dpdk-dumpcap 旁路抓包 */
+	if (g_pcap_path) pcap_open(g_pcap_path);
 	signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
 	g_hz = rte_get_tsc_hz();
 	g_ns_mult = (1000000000ULL << 20) / g_hz;
@@ -675,6 +715,7 @@ int main(int argc, char **argv)
 	rte_eal_mp_wait_lcore();
 	{ static struct port_stat zero[MAX_FLOWS], zero_tx[MAX_FLOWS]; print_stats(zero, zero_tx, (double)(rte_get_timer_cycles() - t0) / hz, true); }
 	for (uint16_t i = 0; i < g_nb_ports; i++) { rte_flow_flush(i, NULL); rte_eth_dev_stop(i); rte_eth_dev_close(i); }
+	if (g_pcap) { fclose(g_pcap); printf("pcap: 写入 %lu 帧到 %s\n", (unsigned long)g_pcap_written, g_pcap_path); }
 	rte_eal_cleanup();
 	return 0;
 }
