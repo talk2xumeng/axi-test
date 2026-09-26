@@ -115,7 +115,7 @@ DMAC(6) | SMAC(6) | TPID 0x8100(2) | PCP/DEI/VID(2) | Length(2) | AXI 事务 × 
 - 采用 raw 802.3 格式带 802.1Q tag，无 LLC 头，Length 之后直接是 AXI 事务。
 - PCP = VC 编号；DEI = 0；VID 可配置（`--vid`）：直连 E100c 时为 0，当前经交换机阶段为 1。
 - Length = Length 字段之后的有效 payload 字节数（不含 padding 和 FCS），≤ 1500。接收端按 Length 截断，忽略补齐字节。
-- 以太头最终是否改用 SUEv1-标准ETH 格式（带 PackNum）尚待确认，见第 8 节。
+- 以太头最终是否改用 SUEv1-标准ETH 格式（带 PackNum）尚待确认，见第 8 节。测试程序已支持 `--hdr sue`（试验性，EtherType / Format / PktType 可配），测试主体（AXI 事务、窗口、统计）与头格式无关。
 
 ### 3.2 VC 映射与事务格式
 
@@ -309,7 +309,7 @@ DMAC(6) | SMAC(6) | TPID 0x8100(2) | PCP/DEI/VID(2) | Length(2) | AXI 事务 × 
 | 8 | 是否需要校验 rdata 内容 | 读响应能否继续用固定模板 | 待澄清 |
 | 9 | write(0001) 类型的 writeFull 取值规则 | 仅影响 TC-11 | 待澄清 |
 | 10 | 物理形态 | 核分配、配置 | 不使用 VF；同一物理口上以 MAC 区分多条流（已定） |
-| 11 | 以太头最终格式：802.3 + Length，还是 SUEv1-标准ETH + PackNum | 帧头长度、解析规则、网卡收包方式 | 待澄清；当前按 802.3 + Length 实现 |
+| 11 | 以太头最终格式：802.3 + Length，还是 SUEv1-标准ETH + PackNum | 帧头长度、解析规则、网卡收包方式 | 待澄清；程序两种都支持（`--hdr eth` / `--hdr sue`），sue 的 EtherType、Format、PktType 编码与 PktType 位宽（5 或 6 bit）待确认 |
 | 12 | 当前交换机型号与单跳时延 | 解释第 9 章 RTT 基线 | 待澄清（估计往返约 4 µs） |
 
 ---
