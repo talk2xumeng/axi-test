@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="640" viewBox="0 0 680 640"><rect width="680" height="640" fill="#FFFFFF"/><defs><marker id="a_D85A30" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#D85A30" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="a_1D9E75" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="a_888780" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs><rect x="40" y="30" width="600" height="76" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="340.0" y="58.0" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#3C3489" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">发送端主机（DPDK：发请求、收响应、统计）</text>
+<text x="340.0" y="79.0" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#534AB7" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">每条流 1 个 TX 核 + 1 个 RX 核，另设 1 个统计核</text>
+<line x1="340" y1="106" x2="340" y2="142" stroke="#888780" stroke-width="1.2" marker-end="url(#a_888780)"/>
+<rect x="190" y="144" width="300" height="66" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.8"/>
+<text x="340.0" y="167.0" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#2C2C2A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">CX7 400G（单端口）</text>
+<text x="340.0" y="188.0" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">流 0：MAC S0（网卡真实 MAC），队列 0</text>
+<text x="340" y="226" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">流 f（f≥1）：派生 MAC Sf，队列 f</text>
+<line x1="292" y1="240" x2="292" y2="300" stroke="#D85A30" stroke-width="2" marker-end="url(#a_D85A30)"/>
+<line x1="308" y1="300" x2="308" y2="240" stroke="#1D9E75" stroke-width="2" marker-end="url(#a_1D9E75)"/>
+<line x1="372" y1="240" x2="372" y2="300" stroke="#D85A30" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#a_D85A30)"/>
+<line x1="388" y1="300" x2="388" y2="240" stroke="#1D9E75" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#a_1D9E75)"/>
+<rect x="215" y="302" width="250" height="56" rx="4" fill="#FAECE7" stroke="#993C1D" stroke-width="0.8"/>
+<text x="340.0" y="320.0" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#712B13" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">E100c</text>
+<text x="340.0" y="341.0" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#993C1D" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">测试对象（按 MAC 转发，读取事务 ID）</text>
+<line x1="292" y1="358" x2="292" y2="418" stroke="#D85A30" stroke-width="2" marker-end="url(#a_D85A30)"/>
+<line x1="308" y1="418" x2="308" y2="358" stroke="#1D9E75" stroke-width="2" marker-end="url(#a_1D9E75)"/>
+<line x1="372" y1="358" x2="372" y2="418" stroke="#D85A30" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#a_D85A30)"/>
+<line x1="388" y1="418" x2="388" y2="358" stroke="#1D9E75" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#a_1D9E75)"/>
+<text x="250" y="270" text-anchor="end" dominant-baseline="central" font-size="12" fill="#5F5E5A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">直连</text>
+<text x="250" y="388" text-anchor="end" dominant-baseline="central" font-size="12" fill="#5F5E5A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">直连</text>
+<rect x="190" y="420" width="300" height="66" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.8"/>
+<text x="340.0" y="443.0" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#2C2C2A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">CX7 400G（单端口）</text>
+<text x="340.0" y="464.0" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">流 0：MAC R0（网卡真实 MAC），队列 0</text>
+<text x="340" y="502" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">流 f（f≥1）：派生 MAC Rf，队列 f</text>
+<line x1="340" y1="516" x2="340" y2="540" stroke="#888780" stroke-width="1.2" marker-end="url(#a_888780)"/>
+<rect x="40" y="542" width="600" height="56" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="340.0" y="560.0" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#3C3489" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">反射端主机（DPDK：收请求、回响应、计数）</text>
+<text x="340.0" y="581.0" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#534AB7" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">每条流 1 个收发核</text>
+<line x1="505" y1="262" x2="535" y2="262" stroke="#D85A30" stroke-width="2"/>
+<text x="541" y="262" text-anchor="start" dominant-baseline="central" font-size="11" fill="#444441" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">请求</text>
+<line x1="505" y1="282" x2="535" y2="282" stroke="#1D9E75" stroke-width="2"/>
+<text x="541" y="282" text-anchor="start" dominant-baseline="central" font-size="11" fill="#444441" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">响应</text>
+<line x1="505" y1="302" x2="535" y2="302" stroke="#5F5E5A" stroke-width="2"/>
+<text x="541" y="302" text-anchor="start" dominant-baseline="central" font-size="11" fill="#444441" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">实线：流 0</text>
+<line x1="505" y1="322" x2="535" y2="322" stroke="#5F5E5A" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="541" y="322" text-anchor="start" dominant-baseline="central" font-size="11" fill="#444441" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">虚线：流 1…N−1</text>
+<text x="40" y="620" text-anchor="start" dominant-baseline="central" font-size="12" fill="#444441" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">请求 DMAC = Rf，SMAC = Sf；响应由反射端交换 MAC。每条流独立 ID 空间（awid/arid 各 511）。</text></svg>
