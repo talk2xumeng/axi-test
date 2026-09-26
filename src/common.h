@@ -95,13 +95,17 @@ struct flow_ctx {
 	struct rte_mempool *rx_pool;
 	struct rte_mempool *tmpl_pool;        /* 预填模板：sender 请求 / reflector 读响应 */
 	uint16_t req_len;                     /* sender：请求帧长 */
-	uint32_t next_id;                     /* sender：下一个分配的 ID（仅 TX 侧写） */
 	struct port_stat st;                  /* RX 核（或单核模式）写 */
 	struct port_stat st_tx;               /* 分核模式 TX 核写，避免伪共享 */
+	/*
+	 * 以上字段初始化后只读，收发两侧每次轮询都会读，禁止在快路径上写（否则伪共享）。
+	 * 以下按写入方分 cache line：
+	 */
 	/* 在途表：TX 侧置位、RX 侧清零（单生产者 / 单消费者） */
 	uint64_t ts[ID_SPACE];
 	uint8_t  outst[ID_SPACE];
 	uint64_t tx_txn __rte_cache_aligned;  /* TX 侧写：累计发出事务数 */
+	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */
 } __rte_cache_aligned;
 

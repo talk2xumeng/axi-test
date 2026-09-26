@@ -25,11 +25,12 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	uint64_t done = __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE);
 	int can = (int)((uint64_t)g_cfg.window - (c->tx_txn - done)) / pack;
 	if (can > g_cfg.burst) can = g_cfg.burst;
+	uint32_t next_id = c->next_id;               /* 局部副本，批末写回 */
 	int n = 0;
 	for (; n < can; n++) {                       /* 接下来 pack 个 ID 均须空闲 */
 		bool ok = true;
 		for (int k = 0; k < pack; k++)
-			if (__atomic_load_n(&c->outst[(c->next_id + n * pack + k) & (ID_SPACE - 1)], __ATOMIC_ACQUIRE)) { ok = false; break; }
+			if (__atomic_load_n(&c->outst[(next_id + n * pack + k) & (ID_SPACE - 1)], __ATOMIC_ACQUIRE)) { ok = false; break; }
 		if (!ok) break;
 	}
 	if (n <= 0 || rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
@@ -38,15 +39,16 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	for (int i = 0; i < n; i++) {
 		uint8_t *p = rte_pktmbuf_mtod(tx[i], uint8_t *) + hl;
 		for (int k = 0; k < pack; k++, p += txn_len) {
-			uint32_t id = c->next_id;
+			uint32_t id = next_id;
 			axi_req_set_id(p, rd, id, beats);
 			c->ts[id] = now;
 			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
-			c->next_id = (id + 1) & (ID_SPACE - 1);
+			next_id = (id + 1) & (ID_SPACE - 1);
 		}
 		tx[i]->data_len = tx[i]->pkt_len = len;
 		tap(&s->dump_tx, c->port, "TX", tx[i]);
 	}
+	c->next_id = next_id;
 	__atomic_store_n(&c->tx_txn, c->tx_txn + (uint64_t)n * pack, __ATOMIC_RELEASE);
 	tx_all(c->port, c->q, tx, (uint16_t)n);
 	s->tx_pkts += n;
