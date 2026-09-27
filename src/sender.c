@@ -13,6 +13,21 @@
 #include "stats.h"
 #include "capture.h"
 
+/*
+ * 超时回收：在途 ID 一定落在 next_id 之前的 511 个 ID 内，且按发出顺序排列。
+ * 从最老的位置往后找，遇到未超时的在途 ID 即停（更新的都更年轻）。
+ * 与 RX 侧用原子交换抢清零，只有一方拿到 1。
+ */
+static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now)
+{
+	const uint32_t end = c->next_id;
+	for (uint32_t id = (end + 1) & (ID_SPACE - 1); id != end; id = (id + 1) & (ID_SPACE - 1)) {
+		if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) continue;
+		if (now - c->ts[id] <= g_cfg.tmo_cyc) break;
+		if (__atomic_exchange_n(&c->outst[id], 0, __ATOMIC_ACQ_REL)) { c->lost_txn++; s->lost++; }
+	}
+}
+
 /* 发一批请求：受窗口与 ID 占用约束。返回发出的包数 */
 static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 {
@@ -23,17 +38,24 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	uint64_t t_s = rte_rdtsc();
 
 	uint64_t done = __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE);
-	int can = (int)((uint64_t)g_cfg.window - (c->tx_txn - done)) / pack;
+	int can = (int)((uint64_t)g_cfg.window - (c->tx_txn - done - c->lost_txn)) / pack;
 	if (can > g_cfg.burst) can = g_cfg.burst;
 	uint32_t next_id = c->next_id;               /* 局部副本，批末写回 */
 	int n = 0;
+	const uint64_t tmo = g_cfg.tmo_cyc;
 	for (; n < can; n++) {                       /* 接下来 pack 个 ID 均须空闲 */
 		bool ok = true;
-		for (int k = 0; k < pack; k++)
-			if (__atomic_load_n(&c->outst[(next_id + n * pack + k) & (ID_SPACE - 1)], __ATOMIC_ACQUIRE)) { ok = false; break; }
+		for (int k = 0; k < pack; k++) {
+			uint32_t id = (next_id + n * pack + k) & (ID_SPACE - 1);
+			if (__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { ok = false; break; }
+		}
 		if (!ok) break;
 	}
-	if (n <= 0 || rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
+	if (n <= 0) {                                /* 窗口满或 ID 被占：顺便检查超时 */
+		if (tmo && t_s - c->rc_last > tmo / 16) { c->rc_last = t_s; reclaim(c, s, t_s); }
+		return 0;
+	}
+	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
 
 	uint64_t now = rte_rdtsc();
 	for (int i = 0; i < n; i++) {
@@ -92,7 +114,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		if (bad) { s->err++; dump_bad(s, c->port, "bad AXI payload", m); }
 		for (int j = 0; j < k; j++) {
 			uint32_t id = ids[j];
-			if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }
+			if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }   /* 重复 / 超时回收后迟到 */
 			hist_add(s, now - c->ts[id]);
 			__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
 			done++;

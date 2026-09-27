@@ -55,6 +55,8 @@ struct config {
 
 	enum hdr_kind hdr;
 	int    vid;                  /* 802.1Q VID（eth 与 sue 均使用） */
+	uint32_t timeout_us;         /* sender：事务超时回收（0 = 不回收） */
+	uint64_t tmo_cyc;            /* 同上，TSC 周期 */
 	bool   promisc;              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
 	/* eth 头 */
 	struct rte_ether_addr peer_mac[MAX_PORTS];   /* sender：各端口对端网卡真实 MAC */
@@ -77,7 +79,7 @@ extern volatile bool g_quit;
 
 struct port_stat {
 	uint64_t tx_pkts, tx_wire_bytes, rx_pkts, rx_wire_bytes;
-	uint64_t txn_done, data_bytes, err, ign, xmac, pcpx, dumped;
+	uint64_t txn_done, data_bytes, err, lost, ign, xmac, pcpx, dumped;
 	uint64_t hist[HIST_N], hist2[HIST2_N];
 	uint64_t rtt_max_ns, rtt_sum_ns, slow;
 	uint64_t busy_cyc, rx_hits, dump_tx, dump_rx;   /* 有活干的循环周期；rx_burst 非空次数；已打印帧数 */
@@ -107,6 +109,8 @@ struct flow_ctx {
 	uint8_t  outst[ID_SPACE];
 	uint64_t tx_txn __rte_cache_aligned;  /* TX 侧写：累计发出事务数 */
 	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID */
+	uint64_t lost_txn;                    /* TX 侧写：超时回收的事务数 */
+	uint64_t rc_last;                     /* TX 侧写：上次超时检查的 TSC */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */
 } __rte_cache_aligned;
 

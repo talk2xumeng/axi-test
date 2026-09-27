@@ -28,7 +28,7 @@ void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, b
 {
 	static int line;
 	if (final || line++ % 20 == 0)
-		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts   err   ign  xmac  pcpx imissed nombuf\n",
+		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts   err  lost   ign  xmac  pcpx imissed nombuf\n",
 		       final ? "---- total/avg ----\n" : "");
 	for (uint16_t i = 0; i < g_nb_flows; i++) {
 		struct port_stat *st = &g_flow[i].st, *o = &prev[i], *tt = &g_flow[i].st_tx, *ot = &prev_tx[i];
@@ -38,7 +38,7 @@ void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, b
 		uint64_t bT = tt->busy_cyc - ot->busy_cyc, bR = st->busy_cyc - o->busy_cyc;
 		uint64_t pk = (txp - otxp) + (st->rx_pkts - o->rx_pkts);
 		uint64_t tot = st->txn_done;
-		printf("%u.%-2u %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %5lu %5lu %5lu %5lu %7lu %6lu\n",
+		printf("%u.%-2u %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %5lu %5lu %5lu %5lu %5lu %7lu %6lu\n",
 		       g_flow[i].port, g_flow[i].flow,
 		       (txp - otxp) / dt / 1e6, (txw - otxw) * 8 / dt / 1e9,
 		       (st->rx_pkts - o->rx_pkts) / dt / 1e6, (st->rx_wire_bytes - o->rx_wire_bytes) * 8 / dt / 1e9,
@@ -49,7 +49,7 @@ void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, b
 		       bT * 100.0 / (dt * g_hz), bR * 100.0 / (dt * g_hz),
 		       pk ? (double)(bT + bR) / pk : 0,
 		       (st->rx_hits - o->rx_hits) ? (double)(st->rx_pkts - o->rx_pkts) / (st->rx_hits - o->rx_hits) : 0,
-		       (unsigned long)txp, (unsigned long)st->rx_pkts, (unsigned long)st->err, (unsigned long)st->ign, (unsigned long)st->xmac,
+		       (unsigned long)txp, (unsigned long)st->rx_pkts, (unsigned long)st->err, (unsigned long)(st->lost + tt->lost), (unsigned long)st->ign, (unsigned long)st->xmac,
 		       (unsigned long)st->pcpx, (unsigned long)es.imissed, (unsigned long)es.rx_nombuf);
 		if (!final) { *o = *st; *ot = *tt; }
 	}

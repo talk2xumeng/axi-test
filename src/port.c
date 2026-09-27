@@ -7,6 +7,7 @@
 #include <rte_ethdev.h>
 #include <rte_flow.h>
 #include <rte_debug.h>
+#include <rte_cycles.h>
 
 #include "port.h"
 #include "hdr.h"
@@ -130,6 +131,32 @@ void port_init(uint16_t pi)
 		else
 			printf("flow %u.%u: queue %u  my %s\n", pi, f, f, a);
 	}
+}
+
+/*
+ * 让交换机学习本端所有流地址：每条流发几个广播帧（SMAC = 流地址，0x8100 + EtherType 0x9000），
+ * 对端按非 AXI 帧计入 ign。纠正此前学错端口的 MAC 表项，避免开头的响应被送到错误端口而丢失。
+ */
+void port_announce(void)
+{
+	for (uint16_t i = 0; i < g_nb_flows; i++) {
+		struct flow_ctx *c = &g_flow[i];
+		struct rte_mbuf *m[4];
+		if (rte_pktmbuf_alloc_bulk(c->rx_pool, m, 4) != 0) continue;
+		for (int k = 0; k < 4; k++) {
+			uint8_t *f = rte_pktmbuf_mtod(m[k], uint8_t *);
+			memset(f, 0, 60);
+			memset(f, 0xFF, 6);
+			memcpy(f + 6, &c->addr.src, 6);
+			f[12] = 0x81; f[13] = 0x00;
+			put_be16(f + 14, (uint16_t)(g_cfg.vid & 0xFFF));
+			put_be16(f + 16, 0x9000);
+			m[k]->data_len = m[k]->pkt_len = 60;
+		}
+		uint16_t s = rte_eth_tx_burst(c->port, c->q, m, 4);
+		if (s < 4) rte_pktmbuf_free_bulk(m + s, 4 - s);
+	}
+	rte_delay_ms(200);
 }
 
 void port_fini(void)

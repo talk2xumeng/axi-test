@@ -7,6 +7,7 @@
 #include "common.h"
 
 void port_init(uint16_t pi);
+void port_announce(void);    /* 所有端口初始化后调用 */
 void port_fini(void);
 
 #endif

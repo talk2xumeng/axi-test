@@ -105,6 +105,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--flows` | 1 | 每端口流数（1~16），每条流独立地址、队列对、ID 空间 |
 | `--nosplit` | — | 发送端改为每条流单核收发 |
 | `--time` | 0 | 运行秒数，0 为直到 Ctrl-C |
+| `--timeout-us` | 10000 | sender：事务超时回收并计入 lost；0 为不回收（丢一个包该流就会停住） |
 | `--dump` | 0 | 打印前 N 个收 / 发的 AXI 帧十六进制 |
 | `--pcap` | — | 抓包模式：把收 / 发的 AXI 帧写入 pcap 文件（纳秒时间戳）；有锁和文件写入，性能会下降 |
 | `--pcap-count` | 1000 | 抓包模式最多写入的帧数 |
@@ -131,7 +132,8 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | busyT% / busyR% | 发送端 TX 核 / RX 核（反射端、单核模式只看 busyR%）忙碌占比，接近 100% 即该核为瓶颈 |
 | cyc/pk | 每个包（收、发各算一次）消耗的 CPU 周期 |
 | rxB | 每次非空 rx_burst 平均包数，接近 64 表示该端接收有积压 |
-| err | ID 异常、头或 payload 非法等（前 5 个异常帧会打印原因与十六进制） |
+| err | ID 异常（重复响应、超时回收后迟到）、头或 payload 非法等（前 5 个异常帧会打印原因与十六进制） |
+| lost | 超时（`--timeout-us`）未收到响应、被回收的事务数，即丢失 |
 | ign / xmac / pcpx | 非 AXI 背景帧数 / DMAC 不是本流的 AXI 帧数（交换机泛洪副本等，已丢弃）/ PCP 与 VC 不一致的帧数 |
 | imissed / nombuf | 网卡侧丢包（描述符 / mbuf 不足） |
 
@@ -149,7 +151,8 @@ mlxconfig -d <BDF> set CQE_COMPRESSION=1
 
 ## 已知限制
 
-- 不做 PFC / 超时处理；ID 超时不回收。
+- 不做 PFC、不重传；超时事务只回收 ID 并计入 lost。9 bit ID 无法区分迟到响应与复用后的新响应，迟到响应计入 err。
+- 启动时每条流发 4 个广播帧（EtherType 0x9000）让交换机学习地址，对端计入 ign。
 - 读响应 rdata 为模板固定内容。
 - RTT 为累计直方图，不按秒清零。
 - eth 头默认非混杂；`--promisc` 可强制打开。sue 头仍用混杂 + allmulticast，靠软件核对 DMAC。
