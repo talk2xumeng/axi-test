@@ -77,7 +77,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 - EtherType / Format / PktType 尚未确定，默认 0x88B5 / 0 / 0，可用 `--sue-ethertype` 等参数改。
 - sue 头的 MAC 不是网卡地址。过交换机时，交换机按这些"MAC"学习与转发；直连 E100c 时由 E100c 按 GPU ID 转发。
 
-测试拓扑、用例与阶段性结果见 `docs/AXI环回测试_拓扑与用例_v0.6.md`。
+测试拓扑、用例与阶段性结果见 `docs/AXI环回测试_拓扑与用例_v0.7.md`。
 
 ## 参数
 
