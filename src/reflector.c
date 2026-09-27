@@ -52,6 +52,7 @@ int reflector_loop(void *arg)
 			int r = hdr_parse(f, m->pkt_len, &hi);
 			if (r == HDR_IGNORE) { s->ign++; rte_pktmbuf_free(m); continue; }
 			if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); rte_pktmbuf_free(m); continue; }
+			if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; rte_pktmbuf_free(m); continue; }   /* 不是发给本流的：不回 */
 
 			uint8_t *p = f + hl;
 			uint8_t vc = axi_req_vc(p[0] >> 4);        /* 按 frame_type 分发，PCP 只做核对 */

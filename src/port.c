@@ -44,7 +44,7 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 }
 
 /* ---------------- 导流：接收帧的 DMAC 字段 == 本流地址 → 本流队列 ---------------- */
-static void steer_flow(uint16_t pi, const struct rte_ether_addr *mac, uint16_t q)
+static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, uint16_t q)
 {
 	struct rte_flow_attr attr = { .ingress = 1 };
 	struct rte_flow_item_eth spec, mask;
@@ -59,9 +59,9 @@ static void steer_flow(uint16_t pi, const struct rte_ether_addr *mac, uint16_t q
 		{ .type = RTE_FLOW_ACTION_TYPE_QUEUE, .conf = &qa },
 		{ .type = RTE_FLOW_ACTION_TYPE_END } };
 	struct rte_flow_error err;
-	if (!rte_flow_create(pi, &attr, pat, act, &err))
-		printf("警告：port %u 为 queue %u 建立导流规则失败（%s），多流时响应可能进错队列\n",
-		       pi, q, err.message ? err.message : "?");
+	if (rte_flow_create(pi, &attr, pat, act, &err)) return 0;
+	printf("警告：port %u 为 queue %u 建立导流规则失败（%s）\n", pi, q, err.message ? err.message : "?");
+	return -1;
 }
 
 void port_init(uint16_t pi)
@@ -97,10 +97,28 @@ void port_init(uint16_t pi)
 		rte_mempool_obj_iter(c->tmpl_pool, tmpl_obj_init, &g_tmpl[fi]);
 	}
 	if (rte_eth_dev_start(pi) < 0) rte_exit(EXIT_FAILURE, "port %u start\n", pi);
-	rte_eth_promiscuous_enable(pi);
-	if (g_cfg.hdr == HDR_SUE) rte_eth_allmulticast_enable(pi);   /* GPU ID 可能让 MAC 首字节组播位为 1 */
-	if (nq > 1)
-		for (uint16_t f = 0; f < nq; f++) steer_flow(pi, &g_flow[pi * nq + f].addr.src, f);
+
+	/*
+	 * 接收过滤：每条流一条 rte_flow 规则（DMAC == 本流地址 → 本流队列），eth 头默认不开混杂，
+	 * 其余单播由网卡丢弃。多网卡接同一交换机同一 VLAN 时，交换机对未学到的 MAC 泛洪，
+	 * 开混杂会让副本进到另一个口：sender 记成重复响应，reflector 从错误的口回包，
+	 * 交换机随之把 MAC 学到错误端口。
+	 * sue 头的 GPU ID 可能让 MAC 组播位为 1，仍开混杂 + allmulticast，靠软件核对 DMAC。
+	 */
+	int bad = 0;
+	for (uint16_t f = 0; f < nq; f++) {
+		const struct rte_ether_addr *m = &g_flow[pi * nq + f].addr.src;
+		if (g_cfg.hdr == HDR_ETH && f > 0 && rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)m, 0) < 0)
+			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, f);
+		bad |= steer_flow(pi, m, f);
+	}
+	if (g_cfg.promisc || g_cfg.hdr == HDR_SUE || bad) {
+		rte_eth_promiscuous_enable(pi);
+		if (g_cfg.hdr == HDR_SUE) rte_eth_allmulticast_enable(pi);
+		printf("port %u: 混杂模式%s\n", pi, bad ? "（导流规则失败，退回）" : "");
+	} else {
+		rte_eth_promiscuous_disable(pi);
+	}
 
 	for (uint16_t f = 0; f < nq; f++) {
 		const struct flow_ctx *c = &g_flow[pi * nq + f];

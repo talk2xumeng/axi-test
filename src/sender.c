@@ -78,6 +78,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		int r = hdr_parse(f, m->pkt_len, &hi);
 		if (r == HDR_IGNORE) { s->ign++; continue; }
 		if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); continue; }
+		if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; continue; }   /* 不是发给本流的（泛洪副本等） */
 
 		uint8_t *p = f + hl, ft0 = p[0] >> 4;          /* 按 frame_type 分发，PCP 只做核对 */
 		if (ft0 != FT_B && ft0 != FT_R) { s->err++; dump_bad(s, c->port, "unexpected frame_type", m); continue; }

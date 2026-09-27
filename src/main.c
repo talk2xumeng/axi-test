@@ -60,6 +60,7 @@ static void usage(void)
 	"  以太头：\n"
 	"    --hdr eth|sue             头格式（默认 eth）\n"
 	"    --vid N                   802.1Q VID（默认 0）\n"
+	"    --promisc                 强制混杂模式（默认 eth 头只收本端各流 MAC）\n"
 	"  eth 头：\n"
 	"    --dmac PORT,MAC           sender：对端网卡真实 MAC，可重复\n"
 	"  sue 头（试验性）：\n"
@@ -73,7 +74,7 @@ static void usage(void)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -87,7 +88,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -105,6 +106,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_TIME:    g_cfg.time = (int)num(optarg); break;
 		case OPT_VID:     g_cfg.vid = (int)num(optarg) & 0xFFF; break;
 		case OPT_NOSPLIT: g_cfg.split = false; break;
+		case OPT_PROMISC: g_cfg.promisc = true; break;
 		case OPT_DUMP:    g_cfg.dump = (int)num(optarg); break;
 		case OPT_FLOWS:   g_cfg.fpp = (int)num(optarg); break;
 		case OPT_PCAP:    g_cfg.pcap_path = optarg; break;

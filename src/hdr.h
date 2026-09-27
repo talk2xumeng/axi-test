@@ -54,6 +54,15 @@ static inline int hdr_parse(const uint8_t *f, uint32_t pkt_len, struct hdr_info 
 	return r;
 }
 
+/* 帧的 DMAC 字段是否为本流地址（多网卡同 VLAN 时，交换机泛洪的副本会进到别的口） */
+static inline bool hdr_to_me(const uint8_t *f, const struct rte_ether_addr *me)
+{
+	const uint8_t *a = me->addr_bytes;
+	uint32_t x, y; uint16_t u, v;
+	memcpy(&x, f, 4); memcpy(&y, a, 4); memcpy(&u, f + 4, 2); memcpy(&v, a + 4, 2);
+	return x == y && u == v;
+}
+
 /* 原地把请求帧头改为响应帧头：交换源 / 目的地址，改 VC、事务个数、长度 */
 static inline void hdr_reply(uint8_t *f, uint8_t vc, uint16_t ntxn, uint16_t plen)
 {

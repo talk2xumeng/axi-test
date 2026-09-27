@@ -2,7 +2,8 @@
 
 一个程序两种模式：`sender`（发请求、收响应、统计带宽与 RTT）和 `reflector`（收请求、回响应）。
 每个 DPDK port 可承载多条流（`--flows`），每条流占一对队列、一个独立的 ID 空间。发送端默认每条流 2 个核（TX 核 + RX 核，共享在途 ID 表），反射端每条流 1 个核；另需 1 个主核做统计输出。
-`-l` 的第一个核是统计核，之后按流展开：发送端流 k 用第 2k+1、2k+2 个核（先 TX 后 RX），反射端流 k 用第 k+1 个核。多流时靠 rte_flow 按接收帧的 DMAC 字段把帧导到对应队列。
+`-l` 的第一个核是统计核，之后按流展开：发送端流 k 用第 2k+1、2k+2 个核（先 TX 后 RX），反射端流 k 用第 k+1 个核。每条流一条 rte_flow 规则按接收帧的 DMAC 字段导到对应队列；eth 头默认不开混杂，其余单播由网卡丢弃，软件再核对一次 DMAC。
+多网卡：`-a` 给多个口，`--flows` 为每口流数，流与核按"口 0 的各流、口 1 的各流…"顺序展开；DPDK 端口号按 PCI 地址顺序，与 `-a` 书写顺序无关。
 
 以太头格式可选（`--hdr`），AXI 事务、窗口、统计、抓包与头格式无关：
 
@@ -61,6 +62,18 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 - 收发核应为 `isolcpus` 隔离核，且与网卡同一 NUMA 节点；DPDK 可用 lcore 编号须 < 128。
 - 抓包：`--pcap /tmp/x.pcap --pcap-count 50` 配合小窗口（如 `--window 4`），性能测试时不要开。
 
+## 运行：多网卡
+
+```bash
+# 两口各 8 条流，单核收发（16 个工作核 + 1 个统计核）
+./axiperf -l 23,24-39 -a 0000:12:00.0,$DEV -a 0000:33:00.0,$DEV -- --mode reflector --vid 1 --flows 8 --burst 16
+./axiperf -l 23,24-39 -a 0000:12:00.0,$DEV -a 0000:33:00.0,$DEV -- --mode sender --op write --vid 1 \
+    --flows 8 --nosplit --burst 16 --time 10 --dmac 0,<对端口 0 MAC> --dmac 1,<对端口 1 MAC>
+```
+
+- 各口的核须与该口在同一 NUMA 节点（程序不检查）。
+- 同一台机器的多个口接同一交换机同一 VLAN 时，交换机泛洪的帧会同时到达本机其它口。非混杂模式下由网卡丢弃；若 `xmac` 持续增长，说明仍有泛洪副本进来（已丢弃，不影响结果）。
+
 ## 运行：sue 头（试验性）
 
 ```bash
@@ -97,6 +110,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--pcap-count` | 1000 | 抓包模式最多写入的帧数 |
 | `--hdr` | eth | 以太头格式：eth / sue |
 | `--vid` | 0 | 802.1Q VID（过交换机时填交换机上的 VLAN） |
+| `--promisc` | — | 强制混杂模式（默认 eth 头只收本端各流 MAC） |
 | `--dmac` | — | eth：`PORT,xx:xx:xx:xx:xx:xx`，对端网卡真实 MAC，可重复 |
 | `--gpu-id` | — | sue：本端 GPU ID 基址（必填） |
 | `--peer-gpu-id` | — | sue：sender 的对端 GPU ID 基址（必填） |
@@ -118,7 +132,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | cyc/pk | 每个包（收、发各算一次）消耗的 CPU 周期 |
 | rxB | 每次非空 rx_burst 平均包数，接近 64 表示该端接收有积压 |
 | err | ID 异常、头或 payload 非法等（前 5 个异常帧会打印原因与十六进制） |
-| ign / pcpx | 非 AXI 背景帧数 / PCP 与 VC 不一致的帧数 |
+| ign / xmac / pcpx | 非 AXI 背景帧数 / DMAC 不是本流的 AXI 帧数（交换机泛洪副本等，已丢弃）/ PCP 与 VC 不一致的帧数 |
 | imissed / nombuf | 网卡侧丢包（描述符 / mbuf 不足） |
 
 理论值（每 100G）：写请求 21.3 Mpps / 数据 87.4G；读响应 22.2 Mpps / 数据 91.1G（eth 头；sue 头每帧多 2B，略低）。
@@ -138,5 +152,5 @@ mlxconfig -d <BDF> set CQE_COMPRESSION=1
 - 不做 PFC / 超时处理；ID 超时不回收。
 - 读响应 rdata 为模板固定内容。
 - RTT 为累计直方图，不按秒清零。
-- 接收端使用混杂模式（sue 头另开 allmulticast），背景帧计入 `ign`。
+- eth 头默认非混杂；`--promisc` 可强制打开。sue 头仍用混杂 + allmulticast，靠软件核对 DMAC。
 - eth 头已在 DOCA DPDK 22.11.2410 + CX7 实机验证（2 条流合计 109G，err = 0）；sue 头仅在 memif 上做过功能验证。
