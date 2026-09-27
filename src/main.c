@@ -182,14 +182,34 @@ int main(int argc, char **argv)
 		       g_cfg.sue_ethertype, g_cfg.sue_format, g_cfg.sue_pkttype, g_cfg.gpu_id,
 		       g_cfg.peer_gpu_id < 0 ? 0 : g_cfg.peer_gpu_id);
 
-	/* 核分配：-l 第一个为统计核；之后按流展开，分核模式每流先 TX 后 RX */
-	unsigned lc, wi = 0;
-	RTE_LCORE_FOREACH_WORKER(lc) {
-		if (wi >= (unsigned)g_nb_flows * per) break;
-		struct flow_ctx *c = &g_flow[wi / per];
-		if (per == 2) rte_eal_remote_launch((wi % 2) ? sender_rx_loop : sender_tx_loop, c, lc);
-		else rte_eal_remote_launch(worker_main, c, lc);
-		wi++;
+	/*
+	 * 核分配：-l 第一个为统计核；其余按流展开（分核模式每流先 TX 后 RX）。
+	 * 每条流优先取与其网卡同一 NUMA 节点、编号最小的空闲核；该节点核不够时取其它节点的核并告警。
+	 */
+	{
+		static bool used[RTE_MAX_LCORE];
+		unsigned wl[RTE_MAX_LCORE], nw = 0, lc;
+		RTE_LCORE_FOREACH_WORKER(lc) wl[nw++] = lc;
+		for (unsigned wi = 0; wi < (unsigned)g_nb_flows * per; wi++) {
+			struct flow_ctx *c = &g_flow[wi / per];
+			int sock = rte_eth_dev_socket_id(c->port);
+			unsigned pick = RTE_MAX_LCORE;
+			for (unsigned j = 0; j < nw && pick == RTE_MAX_LCORE; j++)
+				if (!used[wl[j]] && (sock < 0 || (int)rte_lcore_to_socket_id(wl[j]) == sock)) pick = wl[j];
+			if (pick == RTE_MAX_LCORE) {
+				for (unsigned j = 0; j < nw && pick == RTE_MAX_LCORE; j++) if (!used[wl[j]]) pick = wl[j];
+				printf("警告：flow %u.%u 所在 NUMA %d 的核不够，使用 NUMA %u 的核 %u\n",
+				       c->port, c->flow, sock, rte_lcore_to_socket_id(pick), pick);
+			}
+			used[pick] = true;
+			if (per == 2) {
+				rte_eal_remote_launch((wi % 2) ? sender_rx_loop : sender_tx_loop, c, pick);
+				printf("flow %u.%u %s -> lcore %u\n", c->port, c->flow, (wi % 2) ? "RX" : "TX", pick);
+			} else {
+				rte_eal_remote_launch(worker_main, c, pick);
+				printf("flow %u.%u -> lcore %u\n", c->port, c->flow, pick);
+			}
+		}
 	}
 
 	static struct port_stat prev[MAX_FLOWS], prev_tx[MAX_FLOWS];
