@@ -291,7 +291,7 @@ DMAC(6) | SMAC(6) | TPID 0x8100(2) | PCP/DEI/VID(2) | Length(2) | AXI 事务 × 
 | 主机 | mx-decode-02（发送端）、mx-decode-03（反射端）；Intel Xeon Platinum 8460Y+（Sapphire Rapids），2 × 40 核，160 逻辑 CPU，2 NUMA |
 | 网卡 | 每台 2 块 NVIDIA ConnectX-7 MCX75310AAS-NEAT，400GbE 单端口 OSFP：0000:12:00.0（ens2np0）与 0000:33:00.0（ens3np0），均在 NUMA 0；PCIe Gen5 x16（32GT/s，两台均已确认）；固件 02 为 28.47.1088、03 为 28.49.1014；以太网 pause 关闭。MAC：02 为 a0:88:c2:76:b8:b4 / a0:88:c2:76:cc:1c，03 为 a0:88:c2:76:bb:6c / a0:88:c2:76:cc:0c |
 | PCIe 拓扑 | 两块网卡都经**两级 PCIe 交换芯片**接到不同的 CPU 根端口（12:00.0：03:01.0 → 04:00.0/05:0c.0 → 0f:00.0/10:10.0；33:00.0：2d:01.0 → 2e:00.0/2f:00.0 → 30:00.0/31:10.0），距 CPU 的级数相同 |
-| MaxReadReq（必须） | 默认 256B，改为 **4096B**：`setpci -s <BDF> CAP_EXP+8.w=<原值 bits14:12 置 5>`。须在 axiperf 停止时修改；重启、网卡复位、驱动重载后恢复为 256，需重新设置。两网卡写吞吐提升 13%（见 9.8） |
+| MaxReadReq（必须） | 默认 256B，改为 **4096B**：`setpci -s <BDF> CAP_EXP+8.w=<原值 bits14:12 置 5>`。须在 axiperf 停止时修改；重启、网卡复位、驱动重载后恢复为 256，需重新设置。未带 devargs 时两网卡写吞吐提升 13%（见 9.8）；带 devargs 时单网卡 8 流写 74.9 → 76.3 Mpps（+2%，RTT 24.8 → 23.9 µs），带 devargs 的两网卡对比待补测 |
 | DPDK | DOCA 自带 22.11.2410（`/opt/mellanox/dpdk`），与已装驱动配套；DPDK 可用 lcore 编号须 < 128 |
 | 驱动 | mlx5 bifurcated，无需绑定 vfio；不使用 SR-IOV |
 | 收包 | eth 头非混杂：每条流一条 rte_flow 规则（DMAC → 本流队列），流 MAC 加入网卡 MAC 过滤，其余单播由网卡丢弃；软件再核对一次 DMAC（`xmac`）。`--promisc` 可恢复混杂模式。RX 关闭 VLAN strip |
@@ -459,7 +459,7 @@ DMAC(6) | SMAC(6) | TPID 0x8100(2) | PCP/DEI/VID(2) | Length(2) | AXI 事务 × 
 | 2 | 修复 1 后仍有流在开头停住，无任何丢包计数 | 交换机 MAC 表残留错误表项，开头的响应被送到错误端口后由网卡丢弃；程序无超时，丢一个响应该流永久停住 | 加超时回收与 lost 计数；启动广播帧纠正 MAC 表 |
 | 3 | 个别流速率低约 23%，lost 为奇数 | 超时回收的扫描从 next_id+1 开始，漏掉了挡住分配的 next_id 本身，丢包后该流永久停住 | 修复扫描起点；反射端 `--drop-every` 在 memif 上复现并验证 |
 | 4 | 单网卡、两网卡都只有约 57~61 Mpps，cyc/pk 约 130 | 新终端中 `DEV` 为空，mlx5 devargs 未生效 | 设置 DEV 后单网卡恢复到 76.3 Mpps；程序在缺少 devargs 时告警 |
-| 5 | MaxReadReq 256 | 网卡读 566B 包需拆成 3 个读请求，经两级 PCIe 交换芯片 | 改为 4096：两网卡（未带 devargs 时）写 115.4 → 130.4 Mpps，RTT 33.3 → 27 µs |
+| 5 | MaxReadReq 256 | 网卡读 566B 包需拆成 3 个读请求，经两级 PCIe 交换芯片 | 改为 4096：两网卡（未带 devargs 时）写 115.4 → 130.4 Mpps，RTT 33.3 → 27 µs；带 devargs 后收益小得多（单网卡 +2%），见第 7 章 |
 | 6 | Ctrl-C 无法退出、残留大页 | 网卡状态异常时端口 stop/close 挂住 | 第二次 Ctrl-C 强制退出；建议 `--huge-unlink` |
 | 7 | 读测试 16 条流 lost 均为 510 的整数倍且相同 | 反射端 `--time` 先于发送端到期退出 | 反射端时间明显长于发送端；见 5.3 |
 | 8 | 12:00.0（02 侧）Link down/up、CRC 错误，实测丢过响应 | 链路误码，集中在 lane 1 | 暂未更换，见第 8 节第 14 项；每组测试检查 lost 与 `rx_crc_errors_phy` |
@@ -472,3 +472,4 @@ DMAC(6) | SMAC(6) | TPID 0x8100(2) | PCP/DEI/VID(2) | Length(2) | AXI 事务 × 
 4. 读写混合（TC-08）。
 5. 接入 E100c 前完成第 8 节第 1~4、11 项澄清。
 6. （可选）用最终配置补测单网卡写 1、2、4 条流。
+7. 带 devargs 复测：两网卡 MaxReadReq 256 对照；窗口 1 空载 RTT（9.1 的基线测于调优之前）。
