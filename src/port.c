@@ -8,6 +8,8 @@
 #include <rte_flow.h>
 #include <rte_debug.h>
 #include <rte_cycles.h>
+#include <rte_dev.h>
+#include <rte_devargs.h>
 
 #include "port.h"
 #include "hdr.h"
@@ -65,8 +67,26 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, uint16_t q)
 	return -1;
 }
 
+/* mlx5 未带推荐 devargs 时告警（未带时包率约低 20%，cyc/pk 明显升高） */
+static void check_devargs(uint16_t pi)
+{
+	struct rte_eth_dev_info di;
+	if (rte_eth_dev_info_get(pi, &di) != 0 || !di.driver_name || !strstr(di.driver_name, "mlx5")) return;
+	const struct rte_devargs *da = di.device ? rte_dev_devargs(di.device) : NULL;
+	const char *a = (da && da->args) ? da->args : "";
+	static const char *need[] = { "mprq_en=1", "txq_inline_mpw=" };
+	for (unsigned i = 0; i < RTE_DIM(need); i++)
+		if (!strstr(a, need[i])) {
+			printf("\n*** 警告：port %u（%s）devargs 缺少 %s，当前为 \"%s\"。\n"
+			       "*** 建议 -a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1\n\n",
+			       pi, rte_dev_name(di.device), need[i], a);
+			return;
+		}
+}
+
 void port_init(uint16_t pi)
 {
+	check_devargs(pi);
 	int socket = rte_eth_dev_socket_id(pi);
 	uint16_t nrxd = NB_RXD, ntxd = NB_TXD, nq = (uint16_t)g_cfg.fpp;
 	char name[32];
