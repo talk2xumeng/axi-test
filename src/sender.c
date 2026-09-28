@@ -34,7 +34,7 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 {
 	struct rte_mbuf *tx[MAX_BURST];
 	const int pack = g_cfg.pack, beats = g_cfg.beats;
-	const bool rd = g_cfg.read;
+	const bool rd = c->read;
 	const uint16_t hl = hdr_len(), len = c->req_len, txn_len = axi_req_txn_len(rd, beats);
 	uint64_t t_s = rte_rdtsc();
 
@@ -119,7 +119,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 			hist_add(s, now - c->ts[id]);
 			__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
 			done++;
-			s->data_bytes += g_cfg.read ? data[j] : wdata;
+			s->data_bytes += c->read ? data[j] : wdata;
 		}
 	}
 	s->txn_done += done;

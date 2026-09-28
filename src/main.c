@@ -47,7 +47,7 @@ static void usage(void)
 	"axiperf [EAL 参数] -- [选项]\n"
 	"  通用：\n"
 	"    --mode sender|reflector   角色（默认 sender）\n"
-	"    --op write|read           sender：写 / 读测试（默认 write）\n"
+	"    --op write|read|mix       sender：写 / 读 / 读写并发（mix：每端口偶数号流写、奇数号流读）（默认 write）\n"
 	"    --window N                每条流在途事务上限 1~511（默认 511）\n"
 	"    --pack N                  每请求包事务数（写：pack×beats≤8；读：≤4）（默认 2）\n"
 	"    --beats N                 每事务拍数 1~4（默认 4）\n"
@@ -101,7 +101,12 @@ static void parse_args(int argc, char **argv)
 	while ((o = getopt_long(argc, argv, "", lo, NULL)) != -1) {
 		switch (o) {
 		case OPT_MODE:    g_cfg.sender = strcmp(optarg, "reflector") != 0; break;
-		case OPT_OP:      g_cfg.read = strcmp(optarg, "read") == 0; break;
+		case OPT_OP:
+			if (!strcmp(optarg, "write")) g_cfg.read = false;
+			else if (!strcmp(optarg, "read")) g_cfg.read = true;
+			else if (!strcmp(optarg, "mix")) g_cfg.mix = true;
+			else { printf("未知 --op %s\n", optarg); usage(); exit(1); }
+			break;
 		case OPT_WINDOW:  g_cfg.window = (int)num(optarg); break;
 		case OPT_PACK:    g_cfg.pack = (int)num(optarg); break;
 		case OPT_BEATS:   g_cfg.beats = (int)num(optarg); break;
@@ -134,7 +139,7 @@ static void parse_args(int argc, char **argv)
 	}
 	if (g_cfg.fpp < 1 || g_cfg.fpp > MAX_FPP || g_cfg.window < 1 || g_cfg.window > 511 ||
 	    g_cfg.beats < 1 || g_cfg.beats > 4 || g_cfg.burst < 1 || g_cfg.burst > MAX_BURST || g_cfg.pack < 1 ||
-	    (!g_cfg.read && g_cfg.pack * g_cfg.beats > MAX_BEATS) || (g_cfg.read && g_cfg.pack > 4)) {
+	    ((!g_cfg.read || g_cfg.mix) && g_cfg.pack * g_cfg.beats > MAX_BEATS) || ((g_cfg.read || g_cfg.mix) && g_cfg.pack > 4)) {
 		printf("参数越界：flows 1~%d，window 1~511，beats 1~4，burst 1~%d，写 pack×beats≤8，读 pack≤4\n", MAX_FPP, MAX_BURST);
 		exit(1);
 	}
@@ -185,7 +190,7 @@ int main(int argc, char **argv)
 	port_announce();
 	g_cfg.tmo_cyc = (uint64_t)g_cfg.timeout_us * rte_get_tsc_hz() / 1000000;
 	printf("mode=%s op=%s hdr=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u flows/port=%d\n",
-	       g_cfg.sender ? "sender" : "reflector", g_cfg.read ? "read" : "write", hdr_name(g_cfg.hdr),
+	       g_cfg.sender ? "sender" : "reflector", g_cfg.mix ? "mix" : g_cfg.read ? "read" : "write", hdr_name(g_cfg.hdr),
 	       g_cfg.window, g_cfg.pack, g_cfg.beats, g_cfg.burst, g_cfg.vid, g_cfg.sender && g_cfg.split,
 	       g_nb_ports, g_cfg.fpp);
 	if (g_cfg.hdr == HDR_SUE)

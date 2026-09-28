@@ -36,8 +36,8 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 	const uint16_t hl = hdr_len();
 	memset(t->buf, 0, sizeof(t->buf));
 	if (g_cfg.sender) {
-		uint16_t plen = axi_req_build(t->buf + hl, g_cfg.read, g_cfg.pack, g_cfg.beats);
-		hdr_build(t->buf, &c->addr.dst, &c->addr.src, g_cfg.read ? VC_AR : VC_AW, (uint16_t)g_cfg.pack, plen);
+		uint16_t plen = axi_req_build(t->buf + hl, c->read, g_cfg.pack, g_cfg.beats);
+		hdr_build(t->buf, &c->addr.dst, &c->addr.src, c->read ? VC_AR : VC_AW, (uint16_t)g_cfg.pack, plen);
 		t->len = (uint16_t)(hl + plen);
 		c->req_len = t->len;
 	} else {
@@ -102,6 +102,7 @@ void port_init(uint16_t pi)
 		uint16_t fi = (uint16_t)(pi * nq + f);
 		struct flow_ctx *c = &g_flow[fi];
 		c->port = pi; c->q = f; c->flow = f; c->idx = fi;
+		c->read = g_cfg.mix ? (f & 1) : g_cfg.read;
 		hdr_flow_addr(pi, f, fi, &pmac, &c->addr);
 
 		snprintf(name, sizeof(name), "rx%u_%u", pi, f);
@@ -147,7 +148,7 @@ void port_init(uint16_t pi)
 		hdr_addr_str(&c->addr.src, a, sizeof(a));
 		hdr_addr_str(&c->addr.dst, b, sizeof(b));
 		if (g_cfg.sender)
-			printf("flow %u.%u: queue %u  my %s  peer %s\n", pi, f, f, a, b);
+			printf("flow %u.%u: queue %u  %s  my %s  peer %s\n", pi, f, f, c->read ? "read " : "write", a, b);
 		else
 			printf("flow %u.%u: queue %u  my %s\n", pi, f, f, a);
 	}

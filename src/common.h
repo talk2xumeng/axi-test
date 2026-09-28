@@ -42,6 +42,7 @@ enum hdr_kind {
 struct config {
 	bool   sender;               /* true=sender，false=reflector */
 	bool   read;                 /* sender：false=写，true=读 */
+	bool   mix;                  /* sender：读写并发，每端口偶数号流写、奇数号流读 */
 	int    window;               /* 每条流在途事务上限 */
 	int    pack;                 /* 每请求包事务数 */
 	int    beats;                /* 每事务拍数（awlen/arlen+1） */
@@ -99,6 +100,7 @@ struct flow_ctx {
 	struct rte_mempool *rx_pool;
 	struct rte_mempool *tmpl_pool;        /* 预填模板：sender 请求 / reflector 读响应 */
 	uint16_t req_len;                     /* sender：请求帧长 */
+	bool     read;                        /* sender：本流为读（false 为写） */
 	struct port_stat st;                  /* RX 核（或单核模式）写 */
 	struct port_stat st_tx;               /* 分核模式 TX 核写，避免伪共享 */
 	/*
