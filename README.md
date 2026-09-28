@@ -90,7 +90,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 - EtherType / Format / PktType 尚未确定，默认 0x88B5 / 0 / 0，可用 `--sue-ethertype` 等参数改。
 - sue 头的 MAC 不是网卡地址。过交换机时，交换机按这些"MAC"学习与转发；直连 E100c 时由 E100c 按 GPU ID 转发。
 
-测试拓扑、用例与阶段性结果见 `docs/AXI环回测试_拓扑与用例_v0.7.md`。
+测试拓扑、用例与阶段性结果见 `docs/AXI环回测试_拓扑与用例_v0.8.md`。
 
 ## 参数
 
@@ -145,8 +145,10 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 ```bash
 # devargs
 -a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1
-# 网卡
-mlxconfig -d <BDF> set CQE_COMPRESSION=1
+# 网卡：CQE 压缩保持关闭（开启实测吞吐下降约 14%）
+mlxconfig -d <BDF> set CQE_COMPRESSION=0
+# PCIe MaxReadReq 改为 4096（重启 / 网卡复位后恢复 256，需重设；须在 axiperf 停止时改）
+cur=$(setpci -s <BDF> CAP_EXP+8.w); setpci -s <BDF> CAP_EXP+8.w=$(printf %04x $(( (0x$cur & 0x8fff) | (5 << 12) )))
 # 内核参数：isolcpus / nohz_full / rcu_nocbs 覆盖收发核；收发核、大页与网卡在同一 NUMA 节点；停 irqbalance
 ```
 
@@ -157,4 +159,4 @@ mlxconfig -d <BDF> set CQE_COMPRESSION=1
 - 读响应 rdata 为模板固定内容。
 - RTT 为累计直方图，不按秒清零。
 - eth 头默认非混杂；`--promisc` 可强制打开。sue 头仍用混杂 + allmulticast，靠软件核对 DMAC。
-- eth 头已在 DOCA DPDK 22.11.2410 + CX7 实机验证（2 条流合计 109G，err = 0）；sue 头仅在 memif 上做过功能验证。
+- eth 头已在 DOCA DPDK 22.11.2410 + CX7 实机验证（两网卡 16 条流：写 737G / 读 687G 线上速率，err = 0）；sue 头仅在 memif 上做过功能验证。
