@@ -54,6 +54,7 @@ int reflector_loop(void *arg)
 			if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); rte_pktmbuf_free(m); continue; }
 			if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; rte_pktmbuf_free(m); continue; }   /* 不是发给本流的：不回 */
 
+			if (g_cfg.drop_every && ++s->dropped % g_cfg.drop_every == 0) { rte_pktmbuf_free(m); continue; }  /* 模拟丢包 */
 			uint8_t *p = f + hl;
 			uint8_t vc = axi_req_vc(p[0] >> 4);        /* 按 frame_type 分发，PCP 只做核对 */
 			if (vc != VC_NONE && hi.vc != vc) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }

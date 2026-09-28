@@ -105,6 +105,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--flows` | 1 | 每端口流数（1~16），每条流独立地址、队列对、ID 空间 |
 | `--nosplit` | — | 发送端改为每条流单核收发 |
 | `--time` | 0 | 运行秒数，0 为直到 Ctrl-C |
+| `--drop-every` | 0 | reflector：每 N 个请求包丢 1 个，用于验证丢包处理 |
 | `--timeout-us` | 10000 | sender：事务超时回收并计入 lost；0 为不回收（丢一个包该流就会停住） |
 | `--dump` | 0 | 打印前 N 个收 / 发的 AXI 帧十六进制 |
 | `--pcap` | — | 抓包模式：把收 / 发的 AXI 帧写入 pcap 文件（纳秒时间戳）；有锁和文件写入，性能会下降 |

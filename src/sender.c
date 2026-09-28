@@ -14,14 +14,15 @@
 #include "capture.h"
 
 /*
- * 超时回收：在途 ID 一定落在 next_id 之前的 511 个 ID 内，且按发出顺序排列。
- * 从最老的位置往后找，遇到未超时的在途 ID 即停（更新的都更年轻）。
+ * 超时回收：ID 按顺序分配，从 next_id 开始往后即由老到新
+ * （next_id 本身若仍在途，就是最老的那个——正是它挡住了分配）。
+ * 遇到未超时的在途 ID 即停（更新的都更年轻）。
  * 与 RX 侧用原子交换抢清零，只有一方拿到 1。
  */
 static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now)
 {
-	const uint32_t end = c->next_id;
-	for (uint32_t id = (end + 1) & (ID_SPACE - 1); id != end; id = (id + 1) & (ID_SPACE - 1)) {
+	uint32_t id = c->next_id;
+	for (int i = 0; i < ID_SPACE; i++, id = (id + 1) & (ID_SPACE - 1)) {
 		if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) continue;
 		if (now - c->ts[id] <= g_cfg.tmo_cyc) break;
 		if (__atomic_exchange_n(&c->outst[id], 0, __ATOMIC_ACQ_REL)) { c->lost_txn++; s->lost++; }
