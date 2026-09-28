@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <getopt.h>
+#include <unistd.h>
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -140,7 +141,17 @@ static void parse_args(int argc, char **argv)
 	if (hdr_validate() < 0) exit(1);
 }
 
-static void on_sig(int s) { (void)s; g_quit = true; }
+/* 第一次 Ctrl-C：通知各核退出并正常收尾；第二次：直接退出（网卡卡死时 stop/close 可能挂住） */
+static void on_sig(int s)
+{
+	(void)s;
+	if (g_quit) {
+		static const char m[] = "\n强制退出（未释放端口；建议 EAL 加 --huge-unlink 以免残留大页文件）\n";
+		if (write(2, m, sizeof(m) - 1) < 0) {}
+		_exit(1);
+	}
+	g_quit = true;
+}
 
 static int worker_main(void *arg)       /* 单核模式：sender 或 reflector */
 {
@@ -221,6 +232,7 @@ int main(int argc, char **argv)
 		last = now;
 		if (g_cfg.time && now - t0 >= (uint64_t)g_cfg.time * hz) g_quit = true;
 	}
+	printf("退出中：等待各核停止并关闭端口（再按一次 Ctrl-C 强制退出）\n"); fflush(stdout);
 	rte_eal_mp_wait_lcore();
 	{
 		static struct port_stat zero[MAX_FLOWS], zero_tx[MAX_FLOWS];

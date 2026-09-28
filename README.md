@@ -60,6 +60,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 - 两端 `--hdr`、`--flows`、`--vid` 必须一致；`--dmac` 只需给出反射端网卡真实 MAC，其余流的 MAC 自动派生。
 - 流 f（f ≥ 1）的 MAC = 真实 MAC 首字节置本地管理位（清组播位）、末字节 +f；启动时逐流打印。
 - 收发核应为 `isolcpus` 隔离核，且与网卡同一 NUMA 节点；DPDK 可用 lcore 编号须 < 128。
+- 建议 EAL 加 `--huge-unlink`：进程被杀后不残留大页文件。Ctrl-C 一次正常退出，卡住时再按一次强制退出。
 - 抓包：`--pcap /tmp/x.pcap --pcap-count 50` 配合小窗口（如 `--window 4`），性能测试时不要开。
 
 ## 运行：多网卡
