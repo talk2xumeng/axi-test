@@ -47,15 +47,20 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 }
 
 /* ---------------- 导流：接收帧的 DMAC 字段 == 本流地址 → 本流队列 ---------------- */
-static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, uint16_t q)
+static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, uint16_t q)
 {
 	struct rte_flow_attr attr = { .ingress = 1 };
 	struct rte_flow_item_eth spec, mask;
+	struct rte_flow_item_vlan vspec, vmask;
 	memset(&spec, 0, sizeof(spec)); memset(&mask, 0, sizeof(mask));
+	memset(&vspec, 0, sizeof(vspec)); memset(&vmask, 0, sizeof(vmask));
 	spec.hdr.dst_addr = *mac;
 	memset(&mask.hdr.dst_addr, 0xFF, 6);
+	vspec.tci = rte_cpu_to_be_16((uint16_t)((pcp & 7) << 13));
+	vmask.tci = rte_cpu_to_be_16(0xE000);                     /* 只匹配 PCP */
 	struct rte_flow_item pat[] = {
 		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .spec = &spec, .mask = &mask },
+		{ .type = pcp < 0 ? RTE_FLOW_ITEM_TYPE_END : RTE_FLOW_ITEM_TYPE_VLAN, .spec = &vspec, .mask = &vmask },
 		{ .type = RTE_FLOW_ITEM_TYPE_END } };
 	struct rte_flow_action_queue qa = { .index = q };
 	struct rte_flow_action act[] = {
@@ -63,7 +68,8 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, uint16_t q)
 		{ .type = RTE_FLOW_ACTION_TYPE_END } };
 	struct rte_flow_error err;
 	if (rte_flow_create(pi, &attr, pat, act, &err)) return 0;
-	printf("警告：port %u 为 queue %u 建立导流规则失败（%s）\n", pi, q, err.message ? err.message : "?");
+	printf("警告：port %u 为 queue %u 建立导流规则%s失败（%s）\n", pi, q, pcp < 0 ? "" : "（按 PCP）",
+	       err.message ? err.message : "?");
 	return -1;
 }
 
@@ -88,7 +94,8 @@ void port_init(uint16_t pi)
 {
 	check_devargs(pi);
 	int socket = rte_eth_dev_socket_id(pi);
-	uint16_t nrxd = NB_RXD, ntxd = NB_TXD, nq = (uint16_t)g_cfg.fpp;
+	const int m = ctx_per_flow();
+	uint16_t nrxd = NB_RXD, ntxd = NB_TXD, nf = (uint16_t)g_cfg.fpp, nq = (uint16_t)(nf * m);   /* nf：流（MAC）数；nq：队列数 */
 	char name[32];
 	struct rte_ether_addr pmac;
 	struct rte_eth_conf conf; memset(&conf, 0, sizeof(conf));   /* 不开 VLAN strip */
@@ -98,24 +105,24 @@ void port_init(uint16_t pi)
 		rte_exit(EXIT_FAILURE, "port %u configure failed\n", pi);
 	rte_eth_macaddr_get(pi, &pmac);
 
-	for (uint16_t f = 0; f < nq; f++) {
-		uint16_t fi = (uint16_t)(pi * nq + f);
+	for (uint16_t q = 0; q < nq; q++) {
+		uint16_t f = (uint16_t)(q / m), mf = (uint16_t)(pi * nf + f), fi = (uint16_t)(pi * nq + q);  /* f：端口内流号；mf：全局流号；fi：上下文下标 */
 		struct flow_ctx *c = &g_flow[fi];
-		c->port = pi; c->q = f; c->flow = f; c->idx = fi;
-		c->read = g_cfg.mix ? (f & 1) : g_cfg.read;
-		hdr_flow_addr(pi, f, fi, &pmac, &c->addr);
+		c->port = pi; c->q = q; c->flow = f; c->idx = fi;
+		c->read = g_cfg.rw ? (q % m == 1) : g_cfg.mix ? (f & 1) : g_cfg.read;   /* rw：偶数队列写、奇数队列读 */
+		hdr_flow_addr(pi, f, mf, &pmac, &c->addr);
 
-		snprintf(name, sizeof(name), "rx%u_%u", pi, f);
+		snprintf(name, sizeof(name), "rx%u_%u", pi, q);
 		c->rx_pool = rte_pktmbuf_pool_create(name, RX_POOL_N, POOL_CACHE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, socket);
-		if (!c->rx_pool) rte_exit(EXIT_FAILURE, "rx pool %u.%u\n", pi, f);
-		if (rte_eth_rx_queue_setup(pi, f, nrxd, socket, NULL, c->rx_pool) < 0 ||
-		    rte_eth_tx_queue_setup(pi, f, ntxd, socket, NULL) < 0)
-			rte_exit(EXIT_FAILURE, "port %u queue %u setup failed\n", pi, f);
+		if (!c->rx_pool) rte_exit(EXIT_FAILURE, "rx pool %u.%u\n", pi, q);
+		if (rte_eth_rx_queue_setup(pi, q, nrxd, socket, NULL, c->rx_pool) < 0 ||
+		    rte_eth_tx_queue_setup(pi, q, ntxd, socket, NULL) < 0)
+			rte_exit(EXIT_FAILURE, "port %u queue %u setup failed\n", pi, q);
 
 		tmpl_build(c, &g_tmpl[fi]);
-		snprintf(name, sizeof(name), "tmpl%u_%u", pi, f);
+		snprintf(name, sizeof(name), "tmpl%u_%u", pi, q);
 		c->tmpl_pool = rte_pktmbuf_pool_create(name, TX_POOL_N, POOL_CACHE, 0, RTE_PKTMBUF_HEADROOM + TMPL_ROOM, socket);
-		if (!c->tmpl_pool) rte_exit(EXIT_FAILURE, "tmpl pool %u.%u\n", pi, f);
+		if (!c->tmpl_pool) rte_exit(EXIT_FAILURE, "tmpl pool %u.%u\n", pi, q);
 		rte_mempool_obj_iter(c->tmpl_pool, tmpl_obj_init, &g_tmpl[fi]);
 	}
 	if (rte_eth_dev_start(pi) < 0) rte_exit(EXIT_FAILURE, "port %u start\n", pi);
@@ -127,13 +134,21 @@ void port_init(uint16_t pi)
 	 * 交换机随之把 MAC 学到错误端口。
 	 * sue 头的 GPU ID 可能让 MAC 组播位为 1，仍开混杂 + allmulticast，靠软件核对 DMAC。
 	 */
+	/*
+	 * rw：同一 MAC 的写、读分到两个队列，按 PCP（= VC）区分：
+	 *   sender 收 B（VC2）→ 写队列，R（VC3）→ 读队列；reflector 收 AW（VC0）→ 写队列，AR（VC1）→ 读队列
+	 */
 	int bad = 0;
-	for (uint16_t f = 0; f < nq; f++) {
-		const struct rte_ether_addr *m = &g_flow[pi * nq + f].addr.src;
-		if (g_cfg.hdr == HDR_ETH && f > 0 && rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)m, 0) < 0)
-			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, f);
-		bad |= steer_flow(pi, m, f);
+	for (uint16_t q = 0; q < nq; q++) {
+		const struct flow_ctx *c = &g_flow[pi * nq + q];
+		const struct rte_ether_addr *a = &c->addr.src;
+		if (q % m == 0 && g_cfg.hdr == HDR_ETH && c->flow > 0 &&
+		    rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)a, 0) < 0)
+			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, c->flow);
+		int pcp = m == 1 ? -1 : g_cfg.sender ? (c->read ? VC_R : VC_B) : (c->read ? VC_AR : VC_AW);
+		bad |= steer_flow(pi, a, pcp, q);
 	}
+	if (bad && m == 2) rte_exit(EXIT_FAILURE, "rw 需要按 PCP 导流，规则建立失败\n");
 	if (g_cfg.promisc || g_cfg.hdr == HDR_SUE || bad) {
 		rte_eth_promiscuous_enable(pi);
 		if (g_cfg.hdr == HDR_SUE) rte_eth_allmulticast_enable(pi);
@@ -142,15 +157,15 @@ void port_init(uint16_t pi)
 		rte_eth_promiscuous_disable(pi);
 	}
 
-	for (uint16_t f = 0; f < nq; f++) {
-		const struct flow_ctx *c = &g_flow[pi * nq + f];
+	for (uint16_t q = 0; q < nq; q++) {
+		const struct flow_ctx *c = &g_flow[pi * nq + q];
 		char a[32], b[32];
 		hdr_addr_str(&c->addr.src, a, sizeof(a));
 		hdr_addr_str(&c->addr.dst, b, sizeof(b));
 		if (g_cfg.sender)
-			printf("flow %u.%u: queue %u  %s  my %s  peer %s\n", pi, f, f, c->read ? "read " : "write", a, b);
+			printf("flow %u.%u: queue %u  %s  my %s  peer %s\n", pi, c->flow, q, c->read ? "read " : "write", a, b);
 		else
-			printf("flow %u.%u: queue %u  my %s\n", pi, f, f, a);
+			printf("flow %u.%u: queue %u  %s  my %s\n", pi, c->flow, q, m == 2 ? (c->read ? "AR" : "AW") : "", a);
 	}
 }
 
@@ -162,6 +177,7 @@ void port_announce(void)
 {
 	for (uint16_t i = 0; i < g_nb_flows; i++) {
 		struct flow_ctx *c = &g_flow[i];
+		if (c->q % ctx_per_flow()) continue;       /* rw：读上下文与写上下文同一 MAC，只发一次 */
 		struct rte_mbuf *m[4];
 		if (rte_pktmbuf_alloc_bulk(c->rx_pool, m, 4) != 0) continue;
 		for (int k = 0; k < 4; k++) {

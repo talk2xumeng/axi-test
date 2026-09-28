@@ -38,8 +38,11 @@ void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, b
 		uint64_t bT = tt->busy_cyc - ot->busy_cyc, bR = st->busy_cyc - o->busy_cyc;
 		uint64_t pk = (txp - otxp) + (st->rx_pkts - o->rx_pkts);
 		uint64_t tot = st->txn_done;
-		printf("%u.%-2u %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %5lu %5lu %5lu %5lu %5lu %7lu %6lu\n",
-		       g_flow[i].port, g_flow[i].flow,
+		char lab[24];
+		snprintf(lab, sizeof(lab), "%u.%u%s", g_flow[i].port, g_flow[i].flow,
+		         ((g_cfg.sender && g_cfg.mix) || g_cfg.rw) ? (g_flow[i].read ? "r" : "w") : "");
+		printf("%-4s %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %5lu %5lu %5lu %5lu %5lu %7lu %6lu\n",
+		       lab,
 		       (txp - otxp) / dt / 1e6, (txw - otxw) * 8 / dt / 1e9,
 		       (st->rx_pkts - o->rx_pkts) / dt / 1e6, (st->rx_wire_bytes - o->rx_wire_bytes) * 8 / dt / 1e9,
 		       (st->txn_done - o->txn_done) / dt / 1e6, (st->data_bytes - o->data_bytes) * 8 / dt / 1e9,

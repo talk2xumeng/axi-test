@@ -43,6 +43,8 @@ struct config {
 	bool   sender;               /* true=sender，false=reflector */
 	bool   read;                 /* sender：false=写，true=读 */
 	bool   mix;                  /* sender：读写并发，每端口偶数号流写、奇数号流读 */
+	bool   rw;                   /* 读写并发，同一 MAC 上同时读写：写、读各一个上下文（awid / arid 各一套 ID 空间）、
+	                                各一对队列与核，接收按 PCP（= VC）导流；两端都要设 */
 	int    window;               /* 每条流在途事务上限 */
 	int    pack;                 /* 每请求包事务数 */
 	int    beats;                /* 每事务拍数（awlen/arlen+1） */
@@ -118,7 +120,10 @@ struct flow_ctx {
 } __rte_cache_aligned;
 
 extern struct flow_ctx g_flow[MAX_FLOWS];
-extern uint16_t g_nb_ports, g_nb_flows;
+extern uint16_t g_nb_ports, g_nb_flows;   /* g_nb_flows = 上下文数（rw 时每条流 2 个） */
+
+/* 每条流（每个 MAC）的上下文数：rw 时写、读各一个，共用 MAC，各自队列与核 */
+static inline int ctx_per_flow(void) { return g_cfg.rw ? 2 : 1; }
 
 /* 线上占用：不足 60B 补齐 + FCS 4B + 前导码/SFD/IFG 20B */
 static inline uint16_t frame_wire(uint32_t len) { return (uint16_t)((len < 60 ? 60 : len) + 4 + 20); }
