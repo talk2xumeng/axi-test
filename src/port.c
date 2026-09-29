@@ -75,23 +75,32 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
 }
 
 /*
- * mlx5 未带推荐 devargs 时告警：未带 mprq / inline 时包率约低 20%；
- * 未关 CQE 压缩（rxq_cqe_comp_en=0）时满载 RTT 约高 3.5 µs、单流带宽约低 15%
+ * mlx5 devargs 检查：
+ *   未带 mprq / inline 时包率约低 20%。
+ *   DPDK 侧 CQE 压缩按场景：单流（--flows 1）建议关（rxq_cqe_comp_en=0），满载 RTT 约低 3.5 µs、带宽约高 15%；
+ *   多流建议开（默认，或 =1）：单卡 8 流写关压缩时只有 45 Mpps（开时 78.6），16 流仍约 46 Mpps，
+ *   开销随网卡总包率上升，加核无效。
  */
+#define DEV_BASE "mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1"
 static void check_devargs(uint16_t pi)
 {
 	struct rte_eth_dev_info di;
 	if (rte_eth_dev_info_get(pi, &di) != 0 || !di.driver_name || !strstr(di.driver_name, "mlx5")) return;
 	const struct rte_devargs *da = di.device ? rte_dev_devargs(di.device) : NULL;
 	const char *a = (da && da->args) ? da->args : "";
-	static const char *need[] = { "mprq_en=1", "txq_inline_mpw=", "rxq_cqe_comp_en=0" };
-	for (unsigned i = 0; i < RTE_DIM(need); i++)
-		if (!strstr(a, need[i])) {
-			printf("\n*** 警告：port %u（%s）devargs 缺少 %s，当前为 \"%s\"。\n"
-			       "*** 建议 -a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0\n\n",
-			       pi, rte_dev_name(di.device), need[i], a);
-			return;
-		}
+	const bool single = g_cfg.fpp == 1, cqe_off = strstr(a, "rxq_cqe_comp_en=0") != NULL;
+	const char *rec = single ? DEV_BASE ",rxq_cqe_comp_en=0" : DEV_BASE ",rxq_cqe_comp_en=1";
+	static const char *need[] = { "mprq_en=1", "txq_inline_mpw=" };
+	const char *why = NULL;
+	for (unsigned i = 0; i < RTE_DIM(need) && !why; i++)
+		if (!strstr(a, need[i])) why = need[i];
+	if (!why && single && !cqe_off)
+		why = "rxq_cqe_comp_en=0（单流关 CQE 压缩，满载 RTT 约低 3.5 µs）";
+	if (!why && !single && cqe_off)
+		why = "rxq_cqe_comp_en=1（多流须开 CQE 压缩，关闭时单卡包率约降到 45 Mpps）";
+	if (why)
+		printf("\n*** 警告：port %u（%s）devargs 建议 %s，当前为 \"%s\"。\n"
+		       "*** 建议 -a <BDF>,%s\n\n", pi, rte_dev_name(di.device), why, a, rec);
 }
 
 void port_init(uint16_t pi)
