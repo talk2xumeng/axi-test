@@ -101,6 +101,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--op` | write | sender 用：write / read / mix（偶数号流写、奇数号流读）/ rw（同一 MAC 上同时读写：写、读各一个上下文，各自 511 窗口、队列与核，接收按 PCP=VC 导流；**反射端也要加 `--op rw`**，两端 `--flows` 相同）|
 | `--window` | 511 | 每条流在途事务上限（1~511） |
 | `--pack` | 2 | 每个请求包的事务数（写：pack × beats ≤ 8；读：≤ 4） |
+| `--rpack` | 同 `--pack` | 读请求每包事务数（1~4）；mix / rw 时读、写的打包可分别设置 |
 | `--beats` | 4 | 每事务拍数（awlen/arlen + 1，1~4） |
 | `--burst` | 32 | 每次 tx/rx burst 包数（≤ 64）；反射端每攒够 burst 个响应即发出 |
 | `--flows` | 1 | 每端口流数（1~16），每条流独立地址、队列对、ID 空间 |

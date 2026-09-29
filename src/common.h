@@ -60,6 +60,7 @@ struct config {
 	int    vid;                  /* 802.1Q VID（eth 与 sue 均使用） */
 	uint32_t timeout_us;         /* sender：事务超时回收（0 = 不回收） */
 	uint64_t tmo_cyc;            /* 同上，TSC 周期 */
+	int    rpack;                /* sender：读请求每包事务数（0 = 同 --pack） */
 	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
 	bool   promisc;
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
@@ -125,6 +126,9 @@ extern uint16_t g_nb_ports, g_nb_flows;   /* g_nb_flows = 上下文数（rw 时�
 
 /* 每条流（每个 MAC）的上下文数：rw 时写、读各一个，共用 MAC，各自队列与核 */
 static inline int ctx_per_flow(void) { return g_cfg.rw ? 2 : 1; }
+
+/* 本上下文每请求包的事务数：读用 --rpack（未设时同 --pack），写用 --pack */
+static inline int req_pack(bool read) { return (read && g_cfg.rpack) ? g_cfg.rpack : g_cfg.pack; }
 
 /* 线上占用：不足 60B 补齐 + FCS 4B + 前导码/SFD/IFG 20B */
 static inline uint16_t frame_wire(uint32_t len) { return (uint16_t)((len < 60 ? 60 : len) + 4 + 20); }

@@ -50,6 +50,7 @@ static void usage(void)
 	"    --op write|read|mix|rw    sender：写 / 读 / 读写并发（mix：偶数号流写、奇数号流读；rw：每条流同一 MAC 上同时读写，写、读各一套 ID / 队列 / 核，两端都要设）（默认 write）\n"
 	"    --window N                每条流在途事务上限 1~511（默认 511）\n"
 	"    --pack N                  每请求包事务数（写：pack×beats≤8；读：≤4）（默认 2）\n"
+	"    --rpack N                 读请求每包事务数 1~4，mix / rw 时读写可分别设置（默认同 --pack）\n"
 	"    --beats N                 每事务拍数 1~4（默认 4）\n"
 	"    --burst N                 收发 burst 1~64（默认 32）\n"
 	"    --flows N                 每端口流数 1~16（默认 1）\n"
@@ -78,7 +79,7 @@ static void usage(void)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -92,7 +93,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -120,6 +121,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_TIMEOUT: g_cfg.timeout_us = (uint32_t)num(optarg); break;
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
+		case OPT_RPACK:   g_cfg.rpack = (int)num(optarg); break;
 		case OPT_DUMP:    g_cfg.dump = (int)num(optarg); break;
 		case OPT_FLOWS:   g_cfg.fpp = (int)num(optarg); break;
 		case OPT_PCAP:    g_cfg.pcap_path = optarg; break;
@@ -142,7 +144,7 @@ static void parse_args(int argc, char **argv)
 	}
 	if (g_cfg.fpp < 1 || g_cfg.fpp > MAX_FPP || g_cfg.window < 1 || g_cfg.window > 511 ||
 	    g_cfg.beats < 1 || g_cfg.beats > 4 || g_cfg.burst < 1 || g_cfg.burst > MAX_BURST || g_cfg.pack < 1 ||
-	    ((!g_cfg.read || g_cfg.mix || g_cfg.rw) && g_cfg.pack * g_cfg.beats > MAX_BEATS) || ((g_cfg.read || g_cfg.mix || g_cfg.rw) && g_cfg.pack > 4)) {
+	    ((!g_cfg.read || g_cfg.mix || g_cfg.rw) && g_cfg.pack * g_cfg.beats > MAX_BEATS) || ((g_cfg.read || g_cfg.mix || g_cfg.rw) && req_pack(true) > 4) || g_cfg.rpack < 0) {
 		printf("参数越界：flows 1~%d，window 1~511，beats 1~4，burst 1~%d，写 pack×beats≤8，读 pack≤4\n", MAX_FPP, MAX_BURST);
 		exit(1);
 	}

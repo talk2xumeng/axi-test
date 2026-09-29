@@ -36,8 +36,8 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 	const uint16_t hl = hdr_len();
 	memset(t->buf, 0, sizeof(t->buf));
 	if (g_cfg.sender) {
-		uint16_t plen = axi_req_build(t->buf + hl, c->read, g_cfg.pack, g_cfg.beats);
-		hdr_build(t->buf, &c->addr.dst, &c->addr.src, c->read ? VC_AR : VC_AW, (uint16_t)g_cfg.pack, plen);
+		uint16_t plen = axi_req_build(t->buf + hl, c->read, req_pack(c->read), g_cfg.beats);
+		hdr_build(t->buf, &c->addr.dst, &c->addr.src, c->read ? VC_AR : VC_AW, (uint16_t)req_pack(c->read), plen);
 		t->len = (uint16_t)(hl + plen);
 		c->req_len = t->len;
 	} else {

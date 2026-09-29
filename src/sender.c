@@ -33,7 +33,7 @@ static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now)
 static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 {
 	struct rte_mbuf *tx[MAX_BURST];
-	const int pack = g_cfg.pack, beats = g_cfg.beats;
+	const int pack = req_pack(c->read), beats = g_cfg.beats;
 	const bool rd = c->read;
 	const uint16_t hl = hdr_len(), len = c->req_len, txn_len = axi_req_txn_len(rd, beats);
 	uint64_t t_s = rte_rdtsc();
