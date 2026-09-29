@@ -137,6 +137,14 @@ void port_init(uint16_t pi)
 		rte_mempool_obj_iter(c->tmpl_pool, tmpl_obj_init, &g_tmpl[fi]);
 	}
 	if (rte_eth_dev_start(pi) < 0) rte_exit(EXIT_FAILURE, "port %u start\n", pi);
+	{                                   /* 驱动实际选用的收发函数（向量化 / MPRQ / 标量等），影响时延 */
+		struct rte_eth_burst_mode bm;
+		char rx[RTE_ETH_BURST_MODE_INFO_SIZE] = "?", tx[RTE_ETH_BURST_MODE_INFO_SIZE] = "?";
+		if (rte_eth_rx_burst_mode_get(pi, 0, &bm) == 0) snprintf(rx, sizeof(rx), "%s", bm.info);
+		if (rte_eth_tx_burst_mode_get(pi, 0, &bm) == 0) snprintf(tx, sizeof(tx), "%s", bm.info);
+		printf("port %u: rx burst mode \"%s\", tx burst mode \"%s\"%s\n", pi, rx, tx,
+		       g_cfg.hwts ? "（已开接收时间戳）" : "");
+	}
 
 	/*
 	 * 接收过滤：每条流一条 rte_flow 规则（DMAC == 本流地址 → 本流队列），eth 头默认不开混杂，
