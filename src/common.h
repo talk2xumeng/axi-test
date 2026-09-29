@@ -62,6 +62,7 @@ struct config {
 	uint64_t tmo_cyc;            /* 同上，TSC 周期 */
 	int    rpack;                /* sender：读请求每包事务数（0 = 同 --pack） */
 	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
+	int    txq;                  /* 每个上下文的发送队列数 1~4：同一核把每批包均分到这几个队列（默认 1） */
 	bool   promisc;
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
 	/* eth 头 */
@@ -99,7 +100,8 @@ struct flow_addr {
 
 /* ---------------- 每流上下文 ---------------- */
 struct flow_ctx {
-	uint16_t port, q, flow, idx;          /* 端口、队列号、端口内流序号、全局流序号 */
+	uint16_t port, q, flow, idx;          /* 端口、接收队列号、端口内流序号、全局流序号 */
+	uint16_t txq0;                        /* 首个发送队列号（本上下文用 txq0 .. txq0 + g_cfg.txq - 1） */
 	struct flow_addr addr;
 	struct rte_mempool *rx_pool;
 	struct rte_mempool *tmpl_pool;        /* 预填模板：sender 请求 / reflector 读响应 */
@@ -116,6 +118,7 @@ struct flow_ctx {
 	uint8_t  outst[ID_SPACE];
 	uint64_t tx_txn __rte_cache_aligned;  /* TX 侧写：累计发出事务数 */
 	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID */
+	uint32_t txrr;                        /* TX 侧写：--txq 轮转起点 */
 	uint64_t lost_txn;                    /* TX 侧写：超时回收的事务数 */
 	uint64_t rc_last;                     /* TX 侧写：上次超时检查的 TSC */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */

@@ -18,7 +18,7 @@ static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbu
 		tap(&s->dump_tx, c->port, "TX", tx[j]);
 	}
 	s->tx_pkts += nt;
-	tx_all(c->port, c->q, tx, nt);
+	tx_ctx(c, tx, nt);
 }
 
 /* 合并写响应包收尾：交换地址、写头、定长 */

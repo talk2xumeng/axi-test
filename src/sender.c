@@ -73,7 +73,7 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	}
 	c->next_id = next_id;
 	__atomic_store_n(&c->tx_txn, c->tx_txn + (uint64_t)n * pack, __ATOMIC_RELEASE);
-	tx_all(c->port, c->q, tx, (uint16_t)n);
+	tx_ctx(c, tx, (uint16_t)n);
 	s->tx_pkts += n;
 	s->tx_wire_bytes += (uint64_t)n * frame_wire(len);
 	s->busy_cyc += rte_rdtsc() - t_s;
