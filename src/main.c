@@ -30,6 +30,7 @@
 #include "worker.h"
 #include "stats.h"
 #include "capture.h"
+#include "hwts.h"
 
 struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
@@ -59,6 +60,7 @@ static void usage(void)
 	"    --timeout-us N            sender：事务超时回收，记入 lost（默认 10000，0 为不回收）\n"
 	"    --drop-every N            reflector：每 N 个请求包丢 1 个，用于验证丢包处理（默认 0）\n"
 	"    --b-pack N                reflector：同一批写请求的 B 合并进一个响应包，每包最多 N 个（1~16，默认 1）\n"
+	"    --hwts                    开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd 列，两端都可用）\n"
 	"    --txq N                   每个上下文的发送队列数 1~4，同一核把每批包均分到这些队列；用于测单队列排队对 RTT 的影响（默认 1）\n"
 	"    --dump N                  打印前 N 帧十六进制\n"
 	"    --pcap FILE               抓包模式：收 / 发的 AXI 帧写入 pcap\n"
@@ -80,7 +82,7 @@ static void usage(void)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXQ, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXQ, OPT_HWTS, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -94,7 +96,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"txq", 1, 0, OPT_TXQ}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"txq", 1, 0, OPT_TXQ}, {"hwts", 0, 0, OPT_HWTS}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -123,6 +125,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
 		case OPT_RPACK:   g_cfg.rpack = (int)num(optarg); break;
+		case OPT_HWTS:    g_cfg.hwts = true; break;
 		case OPT_TXQ:     g_cfg.txq = (int)num(optarg); break;
 		case OPT_DUMP:    g_cfg.dump = (int)num(optarg); break;
 		case OPT_FLOWS:   g_cfg.fpp = (int)num(optarg); break;
@@ -196,6 +199,11 @@ int main(int argc, char **argv)
 		struct rte_eth_link lk;
 		if (rte_eth_link_get(i, &lk) == 0 && !lk.link_status) printf("警告：port %u 链路未 up\n", i);
 	}
+	if (g_cfg.hwts) {                       /* 起两个锚点再开跑 */
+		for (uint16_t i = 0; i < g_nb_ports; i++) hwclk_update(i);
+		rte_delay_ms(200);
+		for (uint16_t i = 0; i < g_nb_ports; i++) hwclk_update(i);
+	}
 	port_announce();
 	g_cfg.tmo_cyc = (uint64_t)g_cfg.timeout_us * rte_get_tsc_hz() / 1000000;
 	printf("mode=%s op=%s hdr=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u flows/port=%d txq=%d\n",
@@ -241,6 +249,7 @@ int main(int argc, char **argv)
 	uint64_t t0 = rte_get_timer_cycles(), last = t0, hz = rte_get_timer_hz();
 	while (!g_quit) {
 		rte_delay_ms(1000);
+		if (g_cfg.hwts) for (uint16_t i = 0; i < g_nb_ports; i++) hwclk_update(i);
 		uint64_t now = rte_get_timer_cycles();
 		stats_print(prev, prev_tx, (double)(now - last) / hz, false);
 		last = now;

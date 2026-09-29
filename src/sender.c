@@ -12,6 +12,7 @@
 #include "axi.h"
 #include "stats.h"
 #include "capture.h"
+#include "hwts.h"
 
 /*
  * 超时回收：ID 按顺序分配，从 next_id 开始往后即由老到新
@@ -92,6 +93,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 	const uint16_t hl = hdr_len();
 	const uint64_t wdata = (uint64_t)g_cfg.beats * BEAT;
 	uint64_t now = rte_rdtsc(), done = 0;
+	rxd_record(s, c->port, rx, nr, now);
 	for (uint16_t i = 0; i < nr; i++) {
 		struct rte_mbuf *m = rx[i];
 		uint8_t *f = rte_pktmbuf_mtod(m, uint8_t *);

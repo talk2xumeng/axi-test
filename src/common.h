@@ -62,6 +62,7 @@ struct config {
 	uint64_t tmo_cyc;            /* 同上，TSC 周期 */
 	int    rpack;                /* sender：读请求每包事务数（0 = 同 --pack） */
 	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
+	bool   hwts;                 /* 开接收硬件时间戳，统计接收时延（网卡收到 → CPU 拿到） */
 	int    txq;                  /* 每个上下文的发送队列数 1~4：同一核把每批包均分到这几个队列（默认 1） */
 	bool   promisc;
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
@@ -83,12 +84,15 @@ extern volatile bool g_quit;
 #define HIST2_US    100         /* 粗档：100us 一档，覆盖 200us~100ms */
 #define HIST2_N     1000
 #define SLOW_NS     200000      /* RTT > 200us 计为 slow */
+#define RXD_NS      100         /* 接收时延直方图：100ns 一档，覆盖 0~100us */
+#define RXD_N       1000
 
 struct port_stat {
 	uint64_t tx_pkts, tx_wire_bytes, rx_pkts, rx_wire_bytes;
 	uint64_t txn_done, data_bytes, err, lost, ign, xmac, pcpx, dumped, dropped;
 	uint64_t hist[HIST_N], hist2[HIST2_N];
 	uint64_t rtt_max_ns, rtt_sum_ns, slow;
+	uint64_t rxd_hist[RXD_N], rxd_n, rxd_neg, rxd_bad;   /* --hwts：接收时延直方图、样本数、换算为负、无时间戳 */
 	uint64_t busy_cyc, rx_hits, dump_tx, dump_rx;   /* 有活干的循环周期；rx_burst 非空次数；已打印帧数 */
 } __rte_cache_aligned;
 

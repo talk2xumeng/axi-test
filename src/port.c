@@ -14,6 +14,7 @@
 #include "port.h"
 #include "hdr.h"
 #include "axi.h"
+#include "hwts.h"
 
 /* ---------------- 预填模板 ---------------- */
 struct tmpl { uint8_t buf[TMPL_ROOM]; uint16_t len; };
@@ -100,6 +101,13 @@ void port_init(uint16_t pi)
 	struct rte_ether_addr pmac;
 	struct rte_eth_conf conf; memset(&conf, 0, sizeof(conf));   /* 不开 VLAN strip */
 
+	if (g_cfg.hwts) {
+		struct rte_eth_dev_info di;
+		if (rte_eth_dev_info_get(pi, &di) != 0 || !(di.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP))
+			rte_exit(EXIT_FAILURE, "port %u 不支持接收硬件时间戳\n", pi);
+		if (hwts_enable() < 0) rte_exit(EXIT_FAILURE, "注册 mbuf 时间戳字段失败\n");
+		conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+	}
 	const uint16_t ntq = (uint16_t)(nq * g_cfg.txq);                   /* 发送队列数：每个上下文 --txq 个 */
 	if (rte_eth_dev_configure(pi, nq, ntq, &conf) < 0 ||
 	    rte_eth_dev_adjust_nb_rx_tx_desc(pi, &nrxd, &ntxd) < 0)

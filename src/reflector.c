@@ -10,6 +10,7 @@
 #include "hdr.h"
 #include "axi.h"
 #include "capture.h"
+#include "hwts.h"
 
 static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbuf **tx, uint16_t nt)
 {
@@ -54,6 +55,7 @@ int reflector_loop(void *arg)
 		struct rte_mbuf *bm = NULL;              /* 正在合并 B 的响应包（复用第一个写请求 mbuf） */
 		uint16_t bn = 0;
 		s->rx_hits++;
+		rxd_record(s, c->port, rx, nr, rte_rdtsc());
 
 		for (uint16_t i = 0; i < nr; i++) {
 			struct rte_mbuf *m = rx[i];
