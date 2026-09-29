@@ -60,6 +60,7 @@ struct config {
 	int    vid;                  /* 802.1Q VID（eth 与 sue 均使用） */
 	uint32_t timeout_us;         /* sender：事务超时回收（0 = 不回收） */
 	uint64_t tmo_cyc;            /* 同上，TSC 周期 */
+	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
 	bool   promisc;
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
 	/* eth 头 */

@@ -34,7 +34,7 @@
 struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
 	.time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
-	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000,
+	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1,
 	.sue_ethertype = 0x88B5, .sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
 };
 volatile bool g_quit;
@@ -57,6 +57,7 @@ static void usage(void)
 	"    --time SEC                运行秒数（默认直到 Ctrl-C）\n"
 	"    --timeout-us N            sender：事务超时回收，记入 lost（默认 10000，0 为不回收）\n"
 	"    --drop-every N            reflector：每 N 个请求包丢 1 个，用于验证丢包处理（默认 0）\n"
+	"    --b-pack N                reflector：同一批写请求的 B 合并进一个响应包，每包最多 N 个（1~16，默认 1）\n"
 	"    --dump N                  打印前 N 帧十六进制\n"
 	"    --pcap FILE               抓包模式：收 / 发的 AXI 帧写入 pcap\n"
 	"    --pcap-count N            抓包模式最多写入帧数（默认 1000）\n"
@@ -77,7 +78,7 @@ static void usage(void)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -91,7 +92,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -118,6 +119,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_PROMISC: g_cfg.promisc = true; break;
 		case OPT_TIMEOUT: g_cfg.timeout_us = (uint32_t)num(optarg); break;
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
+		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
 		case OPT_DUMP:    g_cfg.dump = (int)num(optarg); break;
 		case OPT_FLOWS:   g_cfg.fpp = (int)num(optarg); break;
 		case OPT_PCAP:    g_cfg.pcap_path = optarg; break;
@@ -144,6 +146,7 @@ static void parse_args(int argc, char **argv)
 		printf("参数越界：flows 1~%d，window 1~511，beats 1~4，burst 1~%d，写 pack×beats≤8，读 pack≤4\n", MAX_FPP, MAX_BURST);
 		exit(1);
 	}
+	if (g_cfg.b_pack < 1 || g_cfg.b_pack > MAX_TXN) { printf("--b-pack 须为 1~%d\n", MAX_TXN); exit(1); }
 	if (hdr_validate() < 0) exit(1);
 }
 
