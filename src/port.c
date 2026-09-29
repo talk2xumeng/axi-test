@@ -74,18 +74,21 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
 	return -1;
 }
 
-/* mlx5 未带推荐 devargs 时告警（未带时包率约低 20%，cyc/pk 明显升高） */
+/*
+ * mlx5 未带推荐 devargs 时告警：未带 mprq / inline 时包率约低 20%；
+ * 未关 CQE 压缩（rxq_cqe_comp_en=0）时满载 RTT 约高 3.5 µs、单流带宽约低 15%
+ */
 static void check_devargs(uint16_t pi)
 {
 	struct rte_eth_dev_info di;
 	if (rte_eth_dev_info_get(pi, &di) != 0 || !di.driver_name || !strstr(di.driver_name, "mlx5")) return;
 	const struct rte_devargs *da = di.device ? rte_dev_devargs(di.device) : NULL;
 	const char *a = (da && da->args) ? da->args : "";
-	static const char *need[] = { "mprq_en=1", "txq_inline_mpw=" };
+	static const char *need[] = { "mprq_en=1", "txq_inline_mpw=", "rxq_cqe_comp_en=0" };
 	for (unsigned i = 0; i < RTE_DIM(need); i++)
 		if (!strstr(a, need[i])) {
 			printf("\n*** 警告：port %u（%s）devargs 缺少 %s，当前为 \"%s\"。\n"
-			       "*** 建议 -a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1\n\n",
+			       "*** 建议 -a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0\n\n",
 			       pi, rte_dev_name(di.device), need[i], a);
 			return;
 		}
