@@ -142,6 +142,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | err | ID 异常（重复响应、超时回收后迟到）、头或 payload 非法等（前 5 个异常帧会打印原因与十六进制） |
 | lost | 超时（`--timeout-us`）未收到响应、被回收的事务数，即丢失 |
 | ign / xmac / pcpx | 非 AXI 背景帧数 / DMAC 不是本流的 AXI 帧数（交换机泛洪副本等，已丢弃）/ PCP 与 VC 不一致的帧数 |
+| swd50us / swd99us | 软件时延（累计，20 ns 一档，按包计）。sender：打 RTT 起点时间戳 → tx_burst 返回（组包、写 ID、下发描述符）；reflector：rx_burst 返回 → 该响应的 tx_burst 返回（停留时间）。RTT 减去两端 swd、两端 rxd（--hwts）后，剩下网卡收发、PCIe、线路与交换机 |
 | imissed / nombuf | 网卡侧丢包（描述符 / mbuf 不足） |
 
 理论值（每 100G）：写请求 21.3 Mpps / 数据 87.4G；读响应 22.2 Mpps / 数据 91.1G（eth 头；sue 头每帧多 2B，略低）。

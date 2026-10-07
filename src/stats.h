@@ -22,6 +22,14 @@ static inline void hist_add(struct port_stat *s, uint64_t cyc)
 	if (ns > s->rtt_max_ns) s->rtt_max_ns = ns;
 }
 
+/* 软件时延：一批 n 个包共用同一个时延 */
+static inline void swd_add(struct port_stat *s, uint64_t cyc, uint32_t n)
+{
+	uint64_t b = ((cyc * g_ns_mult) >> 20) / SWD_NS;
+	s->swd_hist[b < SWD_N ? b : SWD_N - 1] += n;
+	s->swd_n += n;
+}
+
 void stats_init(void);
 /* prev / prev_tx 为上次快照；final=true 时打印全程汇总且不更新快照 */
 void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, bool final);

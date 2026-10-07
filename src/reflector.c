@@ -12,7 +12,7 @@
 #include "capture.h"
 #include "hwts.h"
 
-static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbuf **tx, uint16_t nt)
+static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbuf **tx, uint16_t nt, uint64_t t_rx)
 {
 	for (uint16_t j = 0; j < nt; j++) {
 		s->tx_wire_bytes += frame_wire(tx[j]->pkt_len);
@@ -20,6 +20,7 @@ static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbu
 	}
 	s->tx_pkts += nt;
 	tx_ctx(c, tx, nt);
+	swd_add(s, rte_rdtsc() - t_rx, nt);   /* 停留时间：rx_burst 返回 → 响应 tx_burst 返回 */
 }
 
 /* 合并写响应包收尾：交换地址、写头、定长 */
@@ -55,7 +56,8 @@ int reflector_loop(void *arg)
 		struct rte_mbuf *bm = NULL;              /* 正在合并 B 的响应包（复用第一个写请求 mbuf） */
 		uint16_t bn = 0;
 		s->rx_hits++;
-		rxd_record(s, c->port, rx, nr, rte_rdtsc());
+		const uint64_t t_rx = rte_rdtsc();
+		rxd_record(s, c->port, rx, nr, t_rx);
 
 		for (uint16_t i = 0; i < nr; i++) {
 			struct rte_mbuf *m = rx[i];
@@ -122,10 +124,10 @@ int reflector_loop(void *arg)
 				s->err++; dump_bad(s, c->port, "unexpected frame_type", m); rte_pktmbuf_free(m);
 			}
 
-			if (nt >= g_cfg.burst) { flush(c, s, tx, nt); nt = 0; }
+			if (nt >= g_cfg.burst) { flush(c, s, tx, nt, t_rx); nt = 0; }
 		}
 		if (bm) { b_finish(bm, bn, hl); tx[nt++] = bm; }
-		if (nt) flush(c, s, tx, nt);
+		if (nt) flush(c, s, tx, nt, t_rx);
 		s->busy_cyc += rte_rdtsc() - t_s;
 	}
 	return 0;

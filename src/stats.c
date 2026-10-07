@@ -23,6 +23,13 @@ static double rxd_pct(const struct port_stat *st, double q)
 	return RXD_N * RXD_NS / 1e3;
 }
 
+static double swd_pct(const struct port_stat *st, double q)
+{
+	uint64_t target = (uint64_t)(st->swd_n * q), acc = 0;
+	for (int i = 0; i < SWD_N; i++) { acc += st->swd_hist[i]; if (acc > target) return (i + 1) * SWD_NS / 1e3; }
+	return SWD_N * SWD_NS / 1e3;
+}
+
 static uint64_t pct(const struct port_stat *st, uint64_t total, double q)
 {
 	uint64_t target = (uint64_t)(total * q), acc = 0;
@@ -35,7 +42,7 @@ void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, b
 {
 	static int line;
 	if (final || line++ % 20 == 0)
-		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts   err  lost   ign  xmac  pcpx imissed nombuf%s\n",
+		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts   err  lost   ign  xmac  pcpx imissed nombuf%s  swd50us swd99us\n",
 		       final ? "---- total/avg ----\n" : "", g_cfg.hwts ? "  rxd50us rxd99us rxdneg" : "");
 	for (uint16_t i = 0; i < g_nb_flows; i++) {
 		struct port_stat *st = &g_flow[i].st, *o = &prev[i], *tt = &g_flow[i].st_tx, *ot = &prev_tx[i];
@@ -63,6 +70,8 @@ void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, b
 		       (unsigned long)st->pcpx, (unsigned long)es.imissed, (unsigned long)es.rx_nombuf);
 		if (g_cfg.hwts)
 			printf("  %7.2f %7.2f %6lu", st->rxd_n ? rxd_pct(st, 0.5) : 0, st->rxd_n ? rxd_pct(st, 0.99) : 0, (unsigned long)st->rxd_neg);
+		const struct port_stat *sw = tt->swd_n ? tt : st;   /* sender 分核时在 TX 核的统计里 */
+		printf("  %7.2f %7.2f", sw->swd_n ? swd_pct(sw, 0.5) : 0, sw->swd_n ? swd_pct(sw, 0.99) : 0);
 		printf("\n");
 		if (!final) { *o = *st; *ot = *tt; }
 	}

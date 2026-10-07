@@ -87,6 +87,8 @@ extern volatile bool g_quit;
 #define SLOW_NS     200000      /* RTT > 200us 计为 slow */
 #define RXD_NS      100         /* 接收时延直方图：100ns 一档，覆盖 0~100us */
 #define RXD_N       1000
+#define SWD_NS      20          /* 软件时延直方图：20ns 一档，覆盖 0~100us */
+#define SWD_N       5000
 
 struct port_stat {
 	uint64_t tx_pkts, tx_wire_bytes, rx_pkts, rx_wire_bytes;
@@ -94,6 +96,8 @@ struct port_stat {
 	uint64_t hist[HIST_N], hist2[HIST2_N];
 	uint64_t rtt_max_ns, rtt_sum_ns, slow;
 	uint64_t rxd_hist[RXD_N], rxd_n, rxd_neg, rxd_bad;   /* --hwts：接收时延直方图、样本数、换算为负、无时间戳 */
+	/* 软件时延（按包计）：sender = 打 RTT 起点时间戳 → tx_burst 返回；reflector = rx_burst 返回 → 响应 tx_burst 返回 */
+	uint64_t swd_hist[SWD_N], swd_n;
 	uint64_t busy_cyc, rx_hits, dump_tx, dump_rx;   /* 有活干的循环周期；rx_burst 非空次数；已打印帧数 */
 } __rte_cache_aligned;
 

@@ -97,6 +97,7 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	c->idq_tail = tail;
 	__atomic_store_n(&c->tx_txn, c->tx_txn + (uint64_t)n * pack, __ATOMIC_RELEASE);
 	tx_ctx(c, tx, (uint16_t)n);
+	swd_add(s, rte_rdtsc() - now, (uint32_t)n);  /* 软件发送时延：RTT 起点 → tx_burst 返回 */
 	s->tx_pkts += n;
 	s->tx_wire_bytes += (uint64_t)n * frame_wire(len);
 	s->busy_cyc += rte_rdtsc() - t_s;
