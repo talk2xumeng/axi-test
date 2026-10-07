@@ -24,6 +24,7 @@
 #define TX_POOL_N   8191
 #define POOL_CACHE  256
 #define MAX_BURST   64
+#define RX_PREFETCH 4           /* 收包循环提前预取后面第 N 个包的帧头 */
 #define TMPL_ROOM   2048        /* 模板 / 发送 mbuf 数据区 */
 
 /* ---------------- 字节序辅助（payload 可能非 4B 对齐） ---------------- */

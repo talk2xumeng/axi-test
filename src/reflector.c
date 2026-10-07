@@ -5,6 +5,7 @@
  *   每攒够 --burst 个响应即发出，降低批处理时延
  */
 #include <rte_cycles.h>
+#include <rte_prefetch.h>
 
 #include "worker.h"
 #include "hdr.h"
@@ -59,18 +60,22 @@ int reflector_loop(void *arg)
 		const uint64_t t_rx = rte_rdtsc();
 		rxd_record(s, c->port, rx, nr, t_rx);
 
+		struct rte_mbuf *fr[MAX_BURST];          /* 本批要释放的请求 mbuf，批末一次 free_bulk */
+		uint16_t nf = 0;
+		for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rte_prefetch0(rte_pktmbuf_mtod(rx[i], void *));
 		for (uint16_t i = 0; i < nr; i++) {
 			struct rte_mbuf *m = rx[i];
+			if (i + RX_PREFETCH < nr) rte_prefetch0(rte_pktmbuf_mtod(rx[i + RX_PREFETCH], void *));
 			uint8_t *f = rte_pktmbuf_mtod(m, uint8_t *);
 			struct hdr_info hi;
 			s->rx_pkts++; s->rx_wire_bytes += frame_wire(m->pkt_len);
 
 			int r = hdr_parse(f, m->pkt_len, &hi);
-			if (r == HDR_IGNORE) { s->ign++; rte_pktmbuf_free(m); continue; }
-			if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); rte_pktmbuf_free(m); continue; }
-			if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; rte_pktmbuf_free(m); continue; }   /* 不是发给本流的：不回 */
+			if (r == HDR_IGNORE) { s->ign++; fr[nf++] = m; continue; }
+			if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); fr[nf++] = m; continue; }
+			if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; fr[nf++] = m; continue; }   /* 不是发给本流的：不回 */
 
-			if (g_cfg.drop_every && ++s->dropped % g_cfg.drop_every == 0) { rte_pktmbuf_free(m); continue; }  /* 模拟丢包 */
+			if (g_cfg.drop_every && ++s->dropped % g_cfg.drop_every == 0) { fr[nf++] = m; continue; }  /* 模拟丢包 */
 			uint8_t *p = f + hl;
 			uint8_t vc = axi_req_vc(p[0] >> 4);        /* 按 frame_type 分发，PCP 只做核对 */
 			if (vc != VC_NONE && hi.vc != vc) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
@@ -81,7 +86,7 @@ int reflector_loop(void *arg)
 			if (vc == VC_AW) {
 				int k = axi_aw_parse(p, hi.plen, hi.ntxn, ids, &bad);
 				if (bad) { s->err++; dump_bad(s, c->port, "bad AXI write payload", m); }
-				if (k == 0) { rte_pktmbuf_free(m); continue; }
+				if (k == 0) { fr[nf++] = m; continue; }
 				if (bpack <= 1) {
 					uint16_t plen = axi_b_build(p, ids, k);
 					hdr_reply(f, VC_B, (uint16_t)k, plen);
@@ -91,7 +96,7 @@ int reflector_loop(void *arg)
 					/* 同一批收到的写请求，B 合并进同一个响应包（VC2 每包 ≤ 16），不额外等待 */
 					if (bm && bn + k > bpack) { b_finish(bm, bn, hl); tx[nt++] = bm; bm = NULL; }
 					if (!bm) { bm = m; bn = 0; }     /* ID 已取出，本包 payload 可覆盖 */
-					else rte_pktmbuf_free(m);
+					else fr[nf++] = m;
 					axi_b_build(rte_pktmbuf_mtod(bm, uint8_t *) + hl + bn * B_RSP, ids, k);
 					bn = (uint16_t)(bn + k);
 				}
@@ -119,15 +124,16 @@ int reflector_loop(void *arg)
 					beats_in += b; cnt++;
 				}
 				if (rm) { r_finish(rm, rp, f, cnt, hl); tx[nt++] = rm; }
-				rte_pktmbuf_free(m);
+				fr[nf++] = m;
 			} else {
-				s->err++; dump_bad(s, c->port, "unexpected frame_type", m); rte_pktmbuf_free(m);
+				s->err++; dump_bad(s, c->port, "unexpected frame_type", m); fr[nf++] = m;
 			}
 
 			if (nt >= g_cfg.burst) { flush(c, s, tx, nt, t_rx); nt = 0; }
 		}
 		if (bm) { b_finish(bm, bn, hl); tx[nt++] = bm; }
 		if (nt) flush(c, s, tx, nt, t_rx);
+		if (nf) rte_pktmbuf_free_bulk(fr, nf);
 		s->busy_cyc += rte_rdtsc() - t_s;
 	}
 	return 0;
