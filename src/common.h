@@ -65,6 +65,7 @@ struct config {
 	bool   hwts;                 /* 开接收硬件时间戳，统计接收时延（网卡收到 → CPU 拿到） */
 	int    txq;                  /* 每个上下文的发送队列数 1~4：同一核把每批包均分到这几个队列（默认 1） */
 	bool   promisc;
+	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
 	/* eth 头 */
 	struct rte_ether_addr peer_mac[MAX_PORTS];   /* sender：各端口对端网卡真实 MAC */
@@ -120,12 +121,22 @@ struct flow_ctx {
 	/* 在途表：TX 侧置位、RX 侧清零（单生产者 / 单消费者） */
 	uint64_t ts[ID_SPACE];
 	uint8_t  outst[ID_SPACE];
+	/*
+	 * 空闲 ID 池（默认）：RX 侧把完成的 ID 写入环 idq 并推进 idq_head，TX 侧从 idq_tail 取。
+	 * 系统里 ID 总数 = --window ≤ 511 < 环长 512，生产者不会追上消费者，TX 侧不用发布 tail。
+	 * 超时回收的 ID 由 TX 侧放进本地 stash，优先使用。
+	 */
+	uint16_t idq[ID_SPACE] __rte_cache_aligned;   /* RX 侧写 */
 	uint64_t tx_txn __rte_cache_aligned;  /* TX 侧写：累计发出事务数 */
-	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID */
+	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID（--id-seq） */
+	uint32_t idq_tail;                    /* TX 侧写：空闲环消费位置 */
+	uint16_t nstash;                      /* TX 侧写：stash 中的 ID 数 */
+	uint16_t stash[ID_SPACE];             /* TX 侧写：超时回收的 ID */
 	uint32_t txrr;                        /* TX 侧写：--txq 轮转起点 */
 	uint64_t lost_txn;                    /* TX 侧写：超时回收的事务数 */
 	uint64_t rc_last;                     /* TX 侧写：上次超时检查的 TSC */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */
+	uint32_t idq_head;                    /* RX 侧写：空闲环生产位置（release 发布） */
 } __rte_cache_aligned;
 
 extern struct flow_ctx g_flow[MAX_FLOWS];

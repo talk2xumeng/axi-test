@@ -62,6 +62,7 @@ static void usage(void)
 	"    --b-pack N                reflector：同一批写请求的 B 合并进一个响应包，每包最多 N 个（1~16，默认 1）\n"
 	"    --hwts                    开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd 列，两端都可用）\n"
 	"    --txq N                   每个上下文的发送队列数 1~4，同一核把每批包均分到这些队列；用于测单队列排队对 RTT 的影响（默认 1）\n"
+	"    --id-seq                  sender：ID 按顺序分配（旧方式）；默认用空闲 ID 池，完成即可复用，不被最老的在途 ID 挡住\n"
 	"    --dump N                  打印前 N 帧十六进制\n"
 	"    --pcap FILE               抓包模式：收 / 发的 AXI 帧写入 pcap\n"
 	"    --pcap-count N            抓包模式最多写入帧数（默认 1000）\n"
@@ -82,7 +83,7 @@ static void usage(void)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXQ, OPT_HWTS, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXQ, OPT_HWTS, OPT_IDSEQ, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -96,7 +97,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"txq", 1, 0, OPT_TXQ}, {"hwts", 0, 0, OPT_HWTS}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"txq", 1, 0, OPT_TXQ}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -126,6 +127,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
 		case OPT_RPACK:   g_cfg.rpack = (int)num(optarg); break;
 		case OPT_HWTS:    g_cfg.hwts = true; break;
+		case OPT_IDSEQ:   g_cfg.id_seq = true; break;
 		case OPT_TXQ:     g_cfg.txq = (int)num(optarg); break;
 		case OPT_DUMP:    g_cfg.dump = (int)num(optarg); break;
 		case OPT_FLOWS:   g_cfg.fpp = (int)num(optarg); break;
@@ -206,10 +208,15 @@ int main(int argc, char **argv)
 	}
 	port_announce();
 	g_cfg.tmo_cyc = (uint64_t)g_cfg.timeout_us * rte_get_tsc_hz() / 1000000;
-	printf("mode=%s op=%s hdr=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u flows/port=%d txq=%d\n",
+	for (uint16_t i = 0; i < g_nb_flows; i++) {      /* 空闲 ID 池：初始放入 0 .. window-1 */
+		struct flow_ctx *c = &g_flow[i];
+		for (int k = 0; k < g_cfg.window; k++) c->idq[k] = (uint16_t)k;
+		c->idq_head = (uint32_t)g_cfg.window;
+	}
+	printf("mode=%s op=%s hdr=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u flows/port=%d txq=%d%s\n",
 	       g_cfg.sender ? "sender" : "reflector", g_cfg.rw ? "rw" : g_cfg.mix ? "mix" : g_cfg.read ? "read" : "write", hdr_name(g_cfg.hdr),
 	       g_cfg.window, g_cfg.pack, g_cfg.beats, g_cfg.burst, g_cfg.vid, g_cfg.sender && g_cfg.split,
-	       g_nb_ports, g_cfg.fpp, g_cfg.txq);
+	       g_nb_ports, g_cfg.fpp, g_cfg.txq, g_cfg.sender ? (g_cfg.id_seq ? " id=seq" : " id=pool") : "");
 	if (g_cfg.hdr == HDR_SUE)
 		printf("sue: ethertype=0x%04x format=%u pkttype=%u gpu_id=0x%04x peer_gpu_id=0x%04x\n",
 		       g_cfg.sue_ethertype, g_cfg.sue_format, g_cfg.sue_pkttype, g_cfg.gpu_id,
