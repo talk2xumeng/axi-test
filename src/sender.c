@@ -6,7 +6,6 @@
  *   分核模式 TX 核只调用 tx_step，RX 核只调用 rx_step（单生产者 / 单消费者）。
  */
 #include <rte_cycles.h>
-#include <rte_prefetch.h>
 
 #include "worker.h"
 #include "hdr.h"
@@ -113,10 +112,10 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 	uint64_t now = rte_rdtsc(), done = 0;
 	uint32_t head = c->idq_head;                 /* 空闲池：本批完成的 ID 写入环，批末一次发布 */
 	rxd_record(s, c->port, rx, nr, now);
-	for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rte_prefetch0(rte_pktmbuf_mtod(rx[i], void *));
+	for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rx_prefetch(rx[i]);
 	for (uint16_t i = 0; i < nr; i++) {
 		struct rte_mbuf *m = rx[i];
-		if (i + RX_PREFETCH < nr) rte_prefetch0(rte_pktmbuf_mtod(rx[i + RX_PREFETCH], void *));
+		if (i + RX_PREFETCH < nr) rx_prefetch(rx[i + RX_PREFETCH]);
 		uint8_t *f = rte_pktmbuf_mtod(m, uint8_t *);
 		struct hdr_info hi;
 		s->rx_pkts++; s->rx_wire_bytes += frame_wire(m->pkt_len);

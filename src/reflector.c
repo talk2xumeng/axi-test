@@ -5,7 +5,6 @@
  *   每攒够 --burst 个响应即发出，降低批处理时延
  */
 #include <rte_cycles.h>
-#include <rte_prefetch.h>
 
 #include "worker.h"
 #include "hdr.h"
@@ -62,10 +61,10 @@ int reflector_loop(void *arg)
 
 		struct rte_mbuf *fr[MAX_BURST];          /* 本批要释放的请求 mbuf，批末一次 free_bulk */
 		uint16_t nf = 0;
-		for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rte_prefetch0(rte_pktmbuf_mtod(rx[i], void *));
+		for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rx_prefetch(rx[i]);
 		for (uint16_t i = 0; i < nr; i++) {
 			struct rte_mbuf *m = rx[i];
-			if (i + RX_PREFETCH < nr) rte_prefetch0(rte_pktmbuf_mtod(rx[i + RX_PREFETCH], void *));
+			if (i + RX_PREFETCH < nr) rx_prefetch(rx[i + RX_PREFETCH]);
 			uint8_t *f = rte_pktmbuf_mtod(m, uint8_t *);
 			struct hdr_info hi;
 			s->rx_pkts++; s->rx_wire_bytes += frame_wire(m->pkt_len);

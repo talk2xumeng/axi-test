@@ -5,12 +5,25 @@
 #define AXIPERF_WORKER_H
 
 #include <rte_ethdev.h>
+#include <rte_prefetch.h>
 #include "common.h"
 
 int sender_loop(void *arg);       /* 单核：同一核收发 */
 int sender_tx_loop(void *arg);    /* 分核：只发请求 */
 int sender_rx_loop(void *arg);    /* 分核：只收响应 */
 int reflector_loop(void *arg);
+
+/*
+ * 预取收到的帧：第 0 行（以太头 + 第一个事务头），以及 256..319 字节那一行。
+ * 2 × 256B 打包时第二个事务头正好落在这一行：写请求在 290（18 + 16 + 256），
+ * 读响应在 278（18 + 4 + 256），不预取每包要多一次缓存缺失。
+ */
+static inline void rx_prefetch(struct rte_mbuf *m)
+{
+	const uint8_t *f = rte_pktmbuf_mtod(m, const uint8_t *);
+	rte_prefetch0(f);
+	if (m->pkt_len > 256) rte_prefetch0(f + 256);
+}
 
 /* 不丢包：发不完就重试，直到退出 */
 static inline void tx_all(uint16_t port, uint16_t q, struct rte_mbuf **pk, uint16_t n)
