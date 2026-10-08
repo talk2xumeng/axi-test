@@ -150,12 +150,15 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 ## 建议调优（参考 NVIDIA DPDK 性能报告）
 
 ```bash
-# devargs
--a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=<0|1>
-# DPDK 侧 CQE 压缩按场景选，程序按 --flows 检查并告警：
-#   单流（--flows 1）：rxq_cqe_comp_en=0 关闭，满载 RTT 约低 3.5 µs，单流带宽约高 15%
-#   多流：rxq_cqe_comp_en=1（即默认）。单卡 8 流写关压缩时只有 45 Mpps / RTT 43 µs（开时 78.6 Mpps / 23.4 µs），
-#         反射端每核 busy 92%；改 16 流（反射端 16 核）仍约 46 Mpps，开销随网卡总包率上升，加核无效
+# devargs 按场景选，程序按 --flows 检查并告警（两端每块网卡都要加）：
+# 单流：
+-a <BDF>,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
+# 多流：
+-a <BDF>,mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1
+#   多包接收（mprq）：多流时发送端要以几十 Mpps 收 64B 写响应，必须开（8 条流吞吐 +43%）；
+#     单流收的是 542~566B 大包，驱动要给每包挂外挂缓冲、做引用计数和回调释放，占反射端约 40% 周期，关掉更快
+#   CQE 压缩：单流关（满载 RTT 约低 3.5 µs）；多流必须开。单卡 8 流写关压缩时只有 45 Mpps / RTT 43 µs
+#     （开时 78.6 Mpps / 23.4 µs）；改 16 流（反射端 16 核）仍约 46 Mpps，开销随网卡总包率上升，加核无效
 # 注意：ethtool 的 rx_cqe_compress 只管内核驱动；mlxconfig CQE_COMPRESSION 只选压缩策略（0=BALANCED），都关不掉 DPDK 侧的压缩
 # PCIe MaxReadReq 改为 4096（重启 / 网卡复位后恢复 256，需重设；须在 axiperf 停止时改）
 cur=$(setpci -s <BDF> CAP_EXP+8.w); setpci -s <BDF> CAP_EXP+8.w=$(printf %04x $(( (0x$cur & 0x8fff) | (5 << 12) )))

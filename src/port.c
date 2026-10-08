@@ -75,32 +75,37 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
 }
 
 /*
- * mlx5 devargs 检查：
- *   未带 mprq / inline 时包率约低 20%。
- *   DPDK 侧 CQE 压缩按场景：单流（--flows 1）建议关（rxq_cqe_comp_en=0），满载 RTT 约低 3.5 µs、带宽约高 15%；
- *   多流建议开（默认，或 =1）：单卡 8 流写关压缩时只有 45 Mpps（开时 78.6），16 流仍约 46 Mpps，
- *   开销随网卡总包率上升，加核无效。
+ * mlx5 devargs 检查，按 --flows 区分：
+ *   单流：关多包接收（不带 mprq_en=1）、关 CQE 压缩。单流收的是 542~566B 大包，多包接收要给每包挂外挂缓冲、
+ *         做引用计数和回调释放，占反射端约 40% 的周期；关掉后单流写 63.0 → 66.3G。关 CQE 压缩满载 RTT 约低 3.5 µs。
+ *   多流：开多包接收（发送端要以几十 Mpps 收 64B 写响应）、开 CQE 压缩。单卡 8 流写关压缩时只有 45 Mpps
+ *         （开时 78.6），16 流仍约 46 Mpps，开销随网卡总包率上升，加核无效。
  */
-#define DEV_BASE "mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1"
+#define DEV_SINGLE "txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"
+#define DEV_MULTI  "mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"
 static void check_devargs(uint16_t pi)
 {
 	struct rte_eth_dev_info di;
 	if (rte_eth_dev_info_get(pi, &di) != 0 || !di.driver_name || !strstr(di.driver_name, "mlx5")) return;
 	const struct rte_devargs *da = di.device ? rte_dev_devargs(di.device) : NULL;
 	const char *a = (da && da->args) ? da->args : "";
-	const bool single = g_cfg.fpp == 1, cqe_off = strstr(a, "rxq_cqe_comp_en=0") != NULL;
-	const char *rec = single ? DEV_BASE ",rxq_cqe_comp_en=0" : DEV_BASE ",rxq_cqe_comp_en=1";
-	static const char *need[] = { "mprq_en=1", "txq_inline_mpw=" };
+	const bool single = g_cfg.fpp == 1;
+	const bool mprq = strstr(a, "mprq_en=1") != NULL, cqe_off = strstr(a, "rxq_cqe_comp_en=0") != NULL;
 	const char *why = NULL;
-	for (unsigned i = 0; i < RTE_DIM(need) && !why; i++)
-		if (!strstr(a, need[i])) why = need[i];
-	if (!why && single && !cqe_off)
+	if (!strstr(a, "txq_inline_mpw="))
+		why = "txq_inline_mpw=128（发送内联，未带时包率约低 20%）";
+	else if (single && mprq)
+		why = "去掉 mprq_en=1（单流收大包，多包接收的外挂缓冲开销大，关掉后带宽约高 5%）";
+	else if (single && !cqe_off)
 		why = "rxq_cqe_comp_en=0（单流关 CQE 压缩，满载 RTT 约低 3.5 µs）";
-	if (!why && !single && cqe_off)
+	else if (!single && !mprq)
+		why = "mprq_en=1（多流时发送端要高包率收小包）";
+	else if (!single && cqe_off)
 		why = "rxq_cqe_comp_en=1（多流须开 CQE 压缩，关闭时单卡包率约降到 45 Mpps）";
 	if (why)
 		printf("\n*** 警告：port %u（%s）devargs 建议 %s，当前为 \"%s\"。\n"
-		       "*** 建议 -a <BDF>,%s\n\n", pi, rte_dev_name(di.device), why, a, rec);
+		       "*** %s建议 -a <BDF>,%s\n\n", pi, rte_dev_name(di.device), why, a,
+		       single ? "单流" : "多流", single ? DEV_SINGLE : DEV_MULTI);
 }
 
 void port_init(uint16_t pi)
