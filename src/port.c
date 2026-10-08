@@ -126,7 +126,7 @@ void port_init(uint16_t pi)
 		if (hwts_enable() < 0) rte_exit(EXIT_FAILURE, "注册 mbuf 时间戳字段失败\n");
 		conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
 	}
-	const uint16_t ntq = (uint16_t)(nq * g_cfg.txq);                   /* 发送队列数：每个上下文 --txq 个 */
+	const uint16_t ntx = (uint16_t)tx_lanes(), ntq = (uint16_t)(nq * ntx);   /* 发送队列数：每个上下文 ntx 个（每个发送核一个） */
 	if (rte_eth_dev_configure(pi, nq, ntq, &conf) < 0 ||
 	    rte_eth_dev_adjust_nb_rx_tx_desc(pi, &nrxd, &ntxd) < 0)
 		rte_exit(EXIT_FAILURE, "port %u configure failed\n", pi);
@@ -135,7 +135,7 @@ void port_init(uint16_t pi)
 	for (uint16_t q = 0; q < nq; q++) {
 		uint16_t f = (uint16_t)(q / m), mf = (uint16_t)(pi * nf + f), fi = (uint16_t)(pi * nq + q);  /* f：端口内流号；mf：全局流号；fi：上下文下标 */
 		struct flow_ctx *c = &g_flow[fi];
-		c->port = pi; c->q = q; c->flow = f; c->idx = fi; c->txq0 = (uint16_t)(q * g_cfg.txq);
+		c->port = pi; c->q = q; c->flow = f; c->idx = fi; c->txq0 = (uint16_t)(q * ntx); c->ntx = ntx;
 		c->read = g_cfg.rw ? (q % m == 1) : g_cfg.mix ? (f & 1) : g_cfg.read;   /* rw：偶数队列写、奇数队列读 */
 		hdr_flow_addr(pi, f, mf, &pmac, &c->addr);
 
@@ -144,9 +144,11 @@ void port_init(uint16_t pi)
 		if (!c->rx_pool) rte_exit(EXIT_FAILURE, "rx pool %u.%u\n", pi, q);
 		if (rte_eth_rx_queue_setup(pi, q, nrxd, socket, NULL, c->rx_pool) < 0)
 			rte_exit(EXIT_FAILURE, "port %u rx queue %u setup failed\n", pi, q);
-		for (int j = 0; j < g_cfg.txq; j++)
+		for (uint16_t j = 0; j < ntx; j++) {
+			c->lane[j].txq = (uint16_t)(c->txq0 + j);
 			if (rte_eth_tx_queue_setup(pi, (uint16_t)(c->txq0 + j), ntxd, socket, NULL) < 0)
 				rte_exit(EXIT_FAILURE, "port %u tx queue %u setup failed\n", pi, c->txq0 + j);
+		}
 
 		tmpl_build(c, &g_tmpl[fi]);
 		snprintf(name, sizeof(name), "tmpl%u_%u", pi, q);
@@ -200,10 +202,10 @@ void port_init(uint16_t pi)
 		hdr_addr_str(&c->addr.src, a, sizeof(a));
 		hdr_addr_str(&c->addr.dst, b, sizeof(b));
 		if (g_cfg.sender)
-			printf("flow %u.%u: rxq %u txq %u-%u  %s  my %s  peer %s\n", pi, c->flow, q, c->txq0, c->txq0 + g_cfg.txq - 1,
+			printf("flow %u.%u: rxq %u txq %u-%u  %s  my %s  peer %s\n", pi, c->flow, q, c->txq0, c->txq0 + c->ntx - 1,
 			       c->read ? "read " : "write", a, b);
 		else
-			printf("flow %u.%u: rxq %u txq %u-%u  %s  my %s\n", pi, c->flow, q, c->txq0, c->txq0 + g_cfg.txq - 1,
+			printf("flow %u.%u: rxq %u txq %u-%u  %s  my %s\n", pi, c->flow, q, c->txq0, c->txq0 + c->ntx - 1,
 			       m == 2 ? (c->read ? "AR" : "AW") : "", a);
 	}
 }

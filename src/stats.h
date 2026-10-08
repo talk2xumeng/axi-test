@@ -32,7 +32,7 @@ static inline void swd_add(struct port_stat *s, uint64_t cyc, uint32_t n)
 }
 
 void stats_init(void);
-/* prev / prev_tx 为上次快照；final=true 时打印全程汇总且不更新快照 */
-void stats_print(struct port_stat *prev, struct port_stat *prev_tx, double dt, bool final);
+/* prev / prev_tx（每个上下文 × 每个发送核）为上次快照；final=true 时打印全程汇总且不更新快照 */
+void stats_print(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_TXC], double dt, bool final);
 
 #endif

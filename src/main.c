@@ -35,7 +35,7 @@
 struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
 	.time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
-	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1, .txq = 1,
+	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1, .tx_cores = 1,
 	.sue_ethertype = 0x88B5, .sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
 };
 volatile bool g_quit;
@@ -61,7 +61,7 @@ static void usage(void)
 	"    --drop-every N            reflector：每 N 个请求包丢 1 个，用于验证丢包处理（默认 0）\n"
 	"    --b-pack N                reflector：同一批写请求的 B 合并进一个响应包，每包最多 N 个（1~16，默认 1）\n"
 	"    --hwts                    开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd 列，两端都可用）\n"
-	"    --txq N                   每个上下文的发送队列数 1~4，同一核把每批包均分到这些队列；用于测单队列排队对 RTT 的影响（默认 1）\n"
+	"    --tx-cores N              sender：每条流的发送核数 1~4，每核独占一个发送队列和一段 ID（窗口均分），同一 MAC、同一接收核（默认 1）\n"
 	"    --id-seq                  sender：ID 按顺序分配（旧方式）；默认用空闲 ID 池，完成即可复用，不被最老的在途 ID 挡住\n"
 	"    --dump N                  打印前 N 帧十六进制\n"
 	"    --pcap FILE               抓包模式：收 / 发的 AXI 帧写入 pcap\n"
@@ -83,7 +83,7 @@ static void usage(void)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXQ, OPT_HWTS, OPT_IDSEQ, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -97,7 +97,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"txq", 1, 0, OPT_TXQ}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -128,7 +128,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_RPACK:   g_cfg.rpack = (int)num(optarg); break;
 		case OPT_HWTS:    g_cfg.hwts = true; break;
 		case OPT_IDSEQ:   g_cfg.id_seq = true; break;
-		case OPT_TXQ:     g_cfg.txq = (int)num(optarg); break;
+		case OPT_TXC:     g_cfg.tx_cores = (int)num(optarg); break;
 		case OPT_DUMP:    g_cfg.dump = (int)num(optarg); break;
 		case OPT_FLOWS:   g_cfg.fpp = (int)num(optarg); break;
 		case OPT_PCAP:    g_cfg.pcap_path = optarg; break;
@@ -156,7 +156,11 @@ static void parse_args(int argc, char **argv)
 		exit(1);
 	}
 	if (g_cfg.b_pack < 1 || g_cfg.b_pack > MAX_TXN) { printf("--b-pack 须为 1~%d\n", MAX_TXN); exit(1); }
-	if (g_cfg.txq < 1 || g_cfg.txq > 4) { printf("--txq 须为 1~4\n"); exit(1); }
+	if (g_cfg.tx_cores < 1 || g_cfg.tx_cores > MAX_TXC) { printf("--tx-cores 须为 1~%d\n", MAX_TXC); exit(1); }
+	if (g_cfg.tx_cores > 1 && (!g_cfg.sender || !g_cfg.split || g_cfg.id_seq || g_cfg.tx_cores * req_pack(g_cfg.read || g_cfg.rw || g_cfg.mix) > g_cfg.window)) {
+		printf("--tx-cores > 1 只用于 sender 收发分核、空闲 ID 池模式（不能与 --nosplit / --id-seq 同用），且每核分到的 ID 数须不少于每包事务数\n");
+		exit(1);
+	}
 	if (hdr_validate() < 0) exit(1);
 }
 
@@ -189,7 +193,8 @@ int main(int argc, char **argv)
 
 	g_nb_ports = rte_eth_dev_count_avail();
 	if (g_nb_ports == 0 || g_nb_ports > MAX_PORTS) rte_exit(EXIT_FAILURE, "ports: %u\n", g_nb_ports);
-	unsigned per = (g_cfg.sender && g_cfg.split) ? 2 : 1;
+	const unsigned ntx = (unsigned)tx_lanes();
+	unsigned per = (g_cfg.sender && g_cfg.split) ? ntx + 1 : 1;   /* 每个上下文的核数：分核时 ntx 个发送核 + 1 个接收核 */
 	g_nb_flows = (uint16_t)(g_nb_ports * g_cfg.fpp * ctx_per_flow());   /* 上下文数：rw 时每条流写、读各一个 */
 	if (g_nb_flows > MAX_FLOWS) rte_exit(EXIT_FAILURE, "上下文数 %u 超过上限 %d（rw 时每条流计 2）\n", g_nb_flows, MAX_FLOWS);
 	if (rte_lcore_count() < (unsigned)g_nb_flows * per + 1)
@@ -208,22 +213,27 @@ int main(int argc, char **argv)
 	}
 	port_announce();
 	g_cfg.tmo_cyc = (uint64_t)g_cfg.timeout_us * rte_get_tsc_hz() / 1000000;
-	for (uint16_t i = 0; i < g_nb_flows; i++) {      /* 空闲 ID 池：初始放入 0 .. window-1 */
+	for (uint16_t i = 0; i < g_nb_flows; i++) {      /* 空闲 ID 池：0 .. window-1 按连续段均分给各发送核 */
 		struct flow_ctx *c = &g_flow[i];
-		for (int k = 0; k < g_cfg.window; k++) c->idq[k] = (uint16_t)k;
-		c->idq_head = (uint32_t)g_cfg.window;
+		const int W = g_cfg.window, N = c->ntx;
+		for (int k = 0; k < N; k++) {
+			struct tx_lane *L = &c->lane[k];
+			const int lo = k * W / N, hi = (k + 1) * W / N;
+			for (int id = lo; id < hi; id++) { L->idq[id - lo] = (uint16_t)id; c->owner[id] = (uint8_t)k; }
+			L->idq_head = (uint32_t)(hi - lo);
+		}
 	}
-	printf("mode=%s op=%s hdr=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u flows/port=%d txq=%d%s\n",
+	printf("mode=%s op=%s hdr=%s window=%d pack=%d beats=%d burst=%d vid=%d split=%d ports=%u flows/port=%d tx_cores=%d%s\n",
 	       g_cfg.sender ? "sender" : "reflector", g_cfg.rw ? "rw" : g_cfg.mix ? "mix" : g_cfg.read ? "read" : "write", hdr_name(g_cfg.hdr),
 	       g_cfg.window, g_cfg.pack, g_cfg.beats, g_cfg.burst, g_cfg.vid, g_cfg.sender && g_cfg.split,
-	       g_nb_ports, g_cfg.fpp, g_cfg.txq, g_cfg.sender ? (g_cfg.id_seq ? " id=seq" : " id=pool") : "");
+	       g_nb_ports, g_cfg.fpp, (int)ntx, g_cfg.sender ? (g_cfg.id_seq ? " id=seq" : " id=pool") : "");
 	if (g_cfg.hdr == HDR_SUE)
 		printf("sue: ethertype=0x%04x format=%u pkttype=%u gpu_id=0x%04x peer_gpu_id=0x%04x\n",
 		       g_cfg.sue_ethertype, g_cfg.sue_format, g_cfg.sue_pkttype, g_cfg.gpu_id,
 		       g_cfg.peer_gpu_id < 0 ? 0 : g_cfg.peer_gpu_id);
 
 	/*
-	 * 核分配：-l 第一个为统计核；其余按流展开（分核模式每流先 TX 后 RX）。
+	 * 核分配：-l 第一个为统计核；其余按流展开（分核模式每流先各发送核、后 RX）。
 	 * 每条流优先取与其网卡同一 NUMA 节点、编号最小的空闲核；该节点核不够时取其它节点的核并告警。
 	 */
 	{
@@ -242,9 +252,20 @@ int main(int argc, char **argv)
 				       c->port, c->flow, sock, rte_lcore_to_socket_id(pick), pick);
 			}
 			used[pick] = true;
-			if (per == 2) {
-				rte_eal_remote_launch((wi % 2) ? sender_rx_loop : sender_tx_loop, c, pick);
-				printf("flow %u.%u %s -> lcore %u\n", c->port, c->flow, (wi % 2) ? "RX" : "TX", pick);
+			if (per > 1) {
+				static struct tx_arg ta[MAX_FLOWS][MAX_TXC];
+				const unsigned k = wi % per;
+				if (k == ntx) {
+					rte_eal_remote_launch(sender_rx_loop, c, pick);
+					printf("flow %u.%u RX -> lcore %u\n", c->port, c->flow, pick);
+				} else {
+					struct tx_arg *a = &ta[wi / per][k];
+					a->c = c; a->k = (uint16_t)k;
+					rte_eal_remote_launch(sender_tx_loop, a, pick);
+					if (ntx > 1) printf("flow %u.%u TX%u (txq %u, ID %d-%d) -> lcore %u\n", c->port, c->flow, k, c->lane[k].txq,
+					                    (int)k * g_cfg.window / (int)ntx, ((int)k + 1) * g_cfg.window / (int)ntx - 1, pick);
+					else printf("flow %u.%u TX -> lcore %u\n", c->port, c->flow, pick);
+				}
 			} else {
 				rte_eal_remote_launch(worker_main, c, pick);
 				printf("flow %u.%u -> lcore %u\n", c->port, c->flow, pick);
@@ -252,7 +273,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	static struct port_stat prev[MAX_FLOWS], prev_tx[MAX_FLOWS];
+	static struct port_stat prev[MAX_FLOWS], prev_tx[MAX_FLOWS][MAX_TXC];
 	uint64_t t0 = rte_get_timer_cycles(), last = t0, hz = rte_get_timer_hz();
 	while (!g_quit) {
 		rte_delay_ms(1000);
@@ -265,7 +286,7 @@ int main(int argc, char **argv)
 	printf("退出中：等待各核停止并关闭端口（再按一次 Ctrl-C 强制退出）\n"); fflush(stdout);
 	rte_eal_mp_wait_lcore();
 	{
-		static struct port_stat zero[MAX_FLOWS], zero_tx[MAX_FLOWS];
+		static struct port_stat zero[MAX_FLOWS], zero_tx[MAX_FLOWS][MAX_TXC];
 		stats_print(zero, zero_tx, (double)(rte_get_timer_cycles() - t0) / hz, true);
 	}
 	port_fini();

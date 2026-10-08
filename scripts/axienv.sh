@@ -2,6 +2,7 @@
 #   反射端: refl <预设> [额外参数]        例: refl SINGLE
 #   发送端: snd  <预设> <窗口> [额外参数]  例: snd SINGLE 511
 #   改核/时长: SL=23,24-27 snd ... / RL=23,24,25 refl ... / T=30 snd ...
+#   单流 2 发送核: SL=23,24-26 snd SINGLE 511 --tx-cores 2（每条流 1 + N 个核）
 BDF=${BDF:-0000:33:00.0}
 PEER=${PEER:-0,a0:88:c2:76:cc:0c}
 VID=${VID:-1}

@@ -24,6 +24,7 @@
 #define TX_POOL_N   8191
 #define POOL_CACHE  256
 #define MAX_BURST   64
+#define MAX_TXC     4           /* sender：每条流的发送核（发送队列）数上限 */
 #define RX_PREFETCH 4           /* 收包循环提前预取后面第 N 个包的帧头 */
 #define TMPL_ROOM   2048        /* 模板 / 发送 mbuf 数据区 */
 
@@ -64,7 +65,7 @@ struct config {
 	int    rpack;                /* sender：读请求每包事务数（0 = 同 --pack） */
 	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
 	bool   hwts;                 /* 开接收硬件时间戳，统计接收时延（网卡收到 → CPU 拿到） */
-	int    txq;                  /* 每个上下文的发送队列数 1~4：同一核把每批包均分到这几个队列（默认 1） */
+	int    tx_cores;             /* sender：每条流的发送核数 1~4，每核独占一个发送队列和一段 ID（默认 1） */
 	bool   promisc;
 	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
@@ -108,36 +109,42 @@ struct flow_addr {
 	struct rte_ether_addr dst;   /* sender：请求帧的 DMAC 字段 */
 };
 
+/* ---------------- 发送核（--tx-cores）：每核一个发送队列、一段 ID、一个空闲环 ---------------- */
+struct tx_lane {
+	struct port_stat st;                  /* 本发送核写 */
+	/*
+	 * 空闲 ID 池（默认）：RX 侧把完成的 ID 写入所属发送核的环 idq 并推进 idq_head，该发送核从 idq_tail 取。
+	 * 每个环里的 ID 总数 ≤ --window ≤ 511 < 环长 512，生产者不会追上消费者，TX 侧不用发布 tail。
+	 */
+	uint16_t idq[ID_SPACE] __rte_cache_aligned;   /* RX 侧写 */
+	uint32_t idq_head __rte_cache_aligned;        /* RX 侧写：空闲环生产位置（release 发布） */
+	uint32_t idq_tail __rte_cache_aligned;        /* TX 侧写：空闲环消费位置 */
+	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID（--id-seq，只用于单发送核） */
+	uint64_t tx_txn;                      /* TX 侧写：累计发出事务数 */
+	uint16_t txq;                         /* 发送队列号（初始化后只读） */
+} __rte_cache_aligned;
+
 /* ---------------- 每流上下文 ---------------- */
 struct flow_ctx {
 	uint16_t port, q, flow, idx;          /* 端口、接收队列号、端口内流序号、全局流序号 */
-	uint16_t txq0;                        /* 首个发送队列号（本上下文用 txq0 .. txq0 + g_cfg.txq - 1） */
+	uint16_t txq0;                        /* 首个发送队列号（本上下文用 txq0 .. txq0 + ntx - 1） */
+	uint16_t ntx;                         /* 发送核数（sender 分核时 = --tx-cores，否则 1） */
+	uint8_t  owner[ID_SPACE];             /* ID → 所属发送核：ID 按连续段分给各发送核，减少各核写 ts / outst 的伪共享 */
 	struct flow_addr addr;
 	struct rte_mempool *rx_pool;
 	struct rte_mempool *tmpl_pool;        /* 预填模板：sender 请求 / reflector 读响应 */
 	uint16_t req_len;                     /* sender：请求帧长 */
 	bool     read;                        /* sender：本流为读（false 为写） */
 	struct port_stat st;                  /* RX 核（或单核模式）写 */
-	struct port_stat st_tx;               /* 分核模式 TX 核写，避免伪共享 */
 	/*
 	 * 以上字段初始化后只读，收发两侧每次轮询都会读，禁止在快路径上写（否则伪共享）。
 	 * 以下按写入方分 cache line：
 	 */
-	/* 在途表：TX 侧置位、RX 侧清零（单生产者 / 单消费者） */
-	uint64_t ts[ID_SPACE];
+	/* 在途表：发送核置位（各核只碰自己那段 ID）、RX 侧清零 */
+	uint64_t ts[ID_SPACE] __rte_cache_aligned;
 	uint8_t  outst[ID_SPACE];
-	/*
-	 * 空闲 ID 池（默认）：RX 侧把完成的 ID 写入环 idq 并推进 idq_head，TX 侧从 idq_tail 取。
-	 * 系统里 ID 总数 = --window ≤ 511 < 环长 512，生产者不会追上消费者，TX 侧不用发布 tail。
-	 * 超时回收在 RX 侧做，回收的 ID 同样写入环。
-	 */
-	uint16_t idq[ID_SPACE] __rte_cache_aligned;   /* RX 侧写 */
-	uint64_t tx_txn __rte_cache_aligned;  /* TX 侧写：累计发出事务数 */
-	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID（--id-seq） */
-	uint32_t idq_tail;                    /* TX 侧写：空闲环消费位置 */
-	uint32_t txrr;                        /* TX 侧写：--txq 轮转起点 */
+	struct tx_lane lane[MAX_TXC];         /* 各发送核；超时回收的 ID 也由 RX 侧还回所属发送核的环 */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */
-	uint32_t idq_head;                    /* RX 侧写：空闲环生产位置（release 发布） */
 	uint64_t lost_txn;                    /* RX 侧写：超时回收的事务数 */
 	uint64_t rc_last;                     /* RX 侧写：上次超时检查的 TSC */
 } __rte_cache_aligned;
@@ -147,6 +154,9 @@ extern uint16_t g_nb_ports, g_nb_flows;   /* g_nb_flows = 上下文数（rw 时�
 
 /* 每条流（每个 MAC）的上下文数：rw 时写、读各一个，共用 MAC，各自队列与核 */
 static inline int ctx_per_flow(void) { return g_cfg.rw ? 2 : 1; }
+
+/* 每个上下文的发送核（发送队列）数：只有 sender 分核模式可多于 1 */
+static inline int tx_lanes(void) { return (g_cfg.sender && g_cfg.split) ? g_cfg.tx_cores : 1; }
 
 /* 本上下文每请求包的事务数：读用 --rpack（未设时同 --pack），写用 --pack */
 static inline int req_pack(bool read) { return (read && g_cfg.rpack) ? g_cfg.rpack : g_cfg.pack; }

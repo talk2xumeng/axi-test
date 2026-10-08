@@ -62,6 +62,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 - 收发核应为 `isolcpus` 隔离核，且与网卡同一 NUMA 节点；DPDK 可用 lcore 编号须 < 128。
 - 建议 EAL 加 `--huge-unlink`：进程被杀后不残留大页文件。Ctrl-C 一次正常退出，卡住时再按一次强制退出。
 - 抓包：`--pcap /tmp/x.pcap --pcap-count 50` 配合小窗口（如 `--window 4`），性能测试时不要开。
+- 单流多发送核：`--tx-cores 2` 时发送端每条流要 3 个核（TX0、TX1、RX），例如 `-l 23,24-26`；反射端不变。
 
 ## 运行：多网卡
 
@@ -109,7 +110,7 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--time` | 0 | 运行秒数，0 为直到 Ctrl-C |
 | `--drop-every` | 0 | reflector：每 N 个请求包丢 1 个，用于验证丢包处理 |
 | `--b-pack` | 1 | reflector：同一批收到的写请求，其 B 合并进一个响应包，每包最多 N 个（1~16，VC2 上限 16），减少写方向反射端发包数与发送端收包数 |
-| `--txq` | 1 | 每个上下文的发送队列数（1~4）。接收仍是一个队列，同一核把每批包均分到 N 个发送队列（起始队列每批轮转），用于测单队列排队对 RTT 的影响；两端可分别设置。多个发送队列在线上可能乱序（不同 ID 之间） |
+| `--tx-cores` | 1 | 发送端每条流的发送核数（1~4）。同一 MAC、同一接收队列和接收核，每个发送核独占一个发送队列和一段连续 ID（窗口均分，如 511、2 核为 0–254 / 255–510），接收核把完成的 ID 还给所属发送核。核数为每条流 1 + N 个，按“发送核 0..N−1、接收核”顺序分配。只用于收发分核、空闲 ID 池模式。单流满载时发送核排队约 1 µs，2 核可降这部分并提高包率。不同发送队列之间在线上可能乱序（不同 ID 之间） |
 | `--hwts` | 关 | 开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd50us / rxd99us 列，两端都可用）。网卡时钟每秒与 TSC 对齐一次，偏差约 ±0.5 µs；rxdneg 为换算为负的样本数，持续增长说明对时不准 |
 | `--id-seq` | 关 | sender：ID 按顺序分配（旧方式）。默认用空闲 ID 池：RX 核把完成的 ID 放回环，TX 核从环里取，完成即可复用，不会被最老的在途 ID 挡住（顺序分配时单流平均在途约 447/511）。两种方式都在 9 bit ID 空间内，任一时刻同一 ID 只在途一次 |
 | `--timeout-us` | 10000 | sender：事务超时回收并计入 lost；0 为不回收（丢一个包该流就会停住） |
@@ -136,13 +137,13 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | dataG | AXI 数据 Gbps（wdata / rdata，仅 sender） |
 | meanus / p50us / p99us / p999us / maxus | RTT（累计）；0~200 µs 为 50 ns 一档，200 µs~100 ms 为 100 µs 一档 |
 | slow | RTT > 200 µs 的事务数 |
-| busyT% / busyR% | 发送端 TX 核 / RX 核（反射端、单核模式只看 busyR%）忙碌占比，接近 100% 即该核为瓶颈 |
+| busyT% / busyR% | 发送端 TX 核 / RX 核（反射端、单核模式只看 busyR%）忙碌占比，接近 100% 即该核为瓶颈；`--tx-cores` > 1 时 busyT% 为各发送核平均 |
 | cyc/pk | 每个包（收、发各算一次）消耗的 CPU 周期 |
 | rxB | 每次非空 rx_burst 平均包数，接近 64 表示该端接收有积压 |
 | err | ID 异常（重复响应、超时回收后迟到）、头或 payload 非法等（前 5 个异常帧会打印原因与十六进制） |
 | lost | 超时（`--timeout-us`）未收到响应、被回收的事务数，即丢失 |
 | ign / xmac / pcpx | 非 AXI 背景帧数 / DMAC 不是本流的 AXI 帧数（交换机泛洪副本等，已丢弃）/ PCP 与 VC 不一致的帧数 |
-| swd50us / swd99us | 软件时延（累计，20 ns 一档，按包计）。sender：打 RTT 起点时间戳 → tx_burst 返回（组包、写 ID、下发描述符）；reflector：rx_burst 返回 → 该响应的 tx_burst 返回（停留时间）。RTT 减去两端 swd、两端 rxd（--hwts）后，剩下网卡收发、PCIe、线路与交换机 |
+| swd50us / swd99us | 软件时延（累计，20 ns 一档，按包计）。sender：打 RTT 起点时间戳 → tx_burst 返回（组包、写 ID、下发描述符；多个发送核时合并统计）；reflector：rx_burst 返回 → 该响应的 tx_burst 返回（停留时间）。RTT 减去两端 swd、两端 rxd（--hwts）后，剩下网卡收发、PCIe、线路与交换机 |
 | imissed / nombuf | 网卡侧丢包（描述符 / mbuf 不足） |
 
 理论值（每 100G）：写请求 21.3 Mpps / 数据 87.4G；读响应 22.2 Mpps / 数据 91.1G（eth 头；sue 头每帧多 2B，略低）。

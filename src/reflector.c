@@ -19,7 +19,7 @@ static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbu
 		tap(&s->dump_tx, c->port, "TX", tx[j]);
 	}
 	s->tx_pkts += nt;
-	tx_ctx(c, tx, nt);
+	tx_all(c->port, c->txq0, tx, nt);
 	swd_add(s, rte_rdtsc() - t_rx, nt);   /* 停留时间：rx_burst 返回 → 响应 tx_burst 返回 */
 }
 
