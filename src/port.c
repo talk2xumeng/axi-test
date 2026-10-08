@@ -92,6 +92,7 @@ static void check_devargs(uint16_t pi)
 	const bool single = g_cfg.fpp == 1;
 	const bool mprq = strstr(a, "mprq_en=1") != NULL, cqe_off = strstr(a, "rxq_cqe_comp_en=0") != NULL;
 	const char *why = NULL;
+	printf("port %u（%s）devargs: \"%s\"\n", pi, rte_dev_name(di.device), a);
 	if (!strstr(a, "txq_inline_mpw="))
 		why = "txq_inline_mpw=128（发送内联，未带时包率约低 20%）";
 	else if (single && mprq)
