@@ -10,6 +10,7 @@ extern uint64_t g_hz, g_ns_mult;       /* ns = cyc * g_ns_mult >> 20，避免快
 
 static inline void hist_add(struct port_stat *s, uint64_t cyc)
 {
+	if ((int64_t)cyc < 0) cyc = 0;       /* 防御：时间戳晚于 now 时按 0 计，不让直方图溢出 */
 	uint64_t ns = (cyc * g_ns_mult) >> 20;
 	uint64_t b = ns / HIST_NS;
 	if (b < HIST_N) s->hist[b]++;

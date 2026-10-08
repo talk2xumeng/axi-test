@@ -25,7 +25,8 @@ static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now, uint3
 	uint64_t n = 0;
 	for (uint32_t id = 0; id < ID_SPACE; id++) {
 		if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) continue;
-		if (now - c->ts[id] <= g_cfg.tmo_cyc) continue;
+		/* 有符号比较：now 取得之后 TX 核可能刚发出这个 ID，ts 会比 now 新 */
+		if ((int64_t)(now - c->ts[id]) <= (int64_t)g_cfg.tmo_cyc) continue;
 		__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
 		if (!g_cfg.id_seq) c->idq[(*head)++ & (ID_SPACE - 1)] = (uint16_t)id;
 		n++;
