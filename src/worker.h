@@ -14,15 +14,19 @@ int sender_rx_loop(void *arg);    /* 分核：只收响应 */
 int reflector_loop(void *arg);
 
 /*
- * 预取收到的帧：第 0 行（以太头 + 第一个事务头），以及 256..319 字节那一行。
- * 2 × 256B 打包时第二个事务头正好落在这一行：写请求在 290（18 + 16 + 256），
- * 读响应在 278（18 + 4 + 256），不预取每包要多一次缓存缺失。
+ * 预取收到的帧中要解析的 cache line：
+ *   ≤ 256B 的控制帧（读请求 18 + 4×16 = 82B、合并写响应 18 + 16×12 = 210B）整帧都要解析，全部预取；
+ *   > 256B 的数据帧（写请求、读响应）只解析事务头：第 0 行，以及 256..319 那一行
+ *   （2 × 256B 打包时第二个事务头在 290 / 278 字节），中间的数据行不碰。
+ * 未预取时：读请求第 4 个读头在第 66 字节（第 1 行），perf 里这一条 load 占反射端 18%。
  */
 static inline void rx_prefetch(struct rte_mbuf *m)
 {
 	const uint8_t *f = rte_pktmbuf_mtod(m, const uint8_t *);
+	const uint32_t len = m->pkt_len;
 	rte_prefetch0(f);
-	if (m->pkt_len > 256) rte_prefetch0(f + 256);
+	if (len > 256) { rte_prefetch0(f + 256); return; }
+	for (uint32_t off = 64; off < len; off += 64) rte_prefetch0(f + off);
 }
 
 /* 不丢包：发不完就重试，直到退出 */

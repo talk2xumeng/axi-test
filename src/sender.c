@@ -33,6 +33,17 @@ static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now, uint3
 	if (n) { s->lost += n; __atomic_store_n(&c->lost_txn, c->lost_txn + n, __ATOMIC_RELEASE); }
 }
 
+/* x / pack：pack 通常为 1、2、4，避免快路径上的整数除法（perf 里 idiv / div 约占 TX 核 5%） */
+static inline int div_pack(int x, int pack)
+{
+	switch (pack) {
+	case 1: return x;
+	case 2: return x >> 1;
+	case 4: return x >> 2;
+	default: return x / pack;
+	}
+}
+
 /* 发一批请求：受窗口与 ID 占用约束。返回发出的包数 */
 static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 {
@@ -40,17 +51,15 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	const int pack = req_pack(c->read), beats = g_cfg.beats;
 	const bool rd = c->read;
 	const uint16_t hl = hdr_len(), len = c->req_len, txn_len = axi_req_txn_len(rd, beats);
-	uint64_t t_s = rte_rdtsc();
-
-	uint64_t done = __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE);
-	uint64_t lost = __atomic_load_n(&c->lost_txn, __ATOMIC_ACQUIRE);
-	int can = (int)((uint64_t)g_cfg.window - (c->tx_txn - done - lost)) / pack;
-	if (can > g_cfg.burst) can = g_cfg.burst;
 	const bool seq = g_cfg.id_seq;
 	uint32_t next_id = c->next_id;               /* 局部副本，批末写回 */
 	uint32_t tail = c->idq_tail;
 	int n = 0;
 	if (seq) {
+		uint64_t done = __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE);
+		uint64_t lost = __atomic_load_n(&c->lost_txn, __ATOMIC_ACQUIRE);
+		int can = div_pack((int)((uint64_t)g_cfg.window - (c->tx_txn - done - lost)), pack);
+		if (can > g_cfg.burst) can = g_cfg.burst;
 		for (; n < can; n++) {                   /* 接下来 pack 个 ID 均须空闲 */
 			bool ok = true;
 			for (int k = 0; k < pack; k++) {
@@ -59,11 +68,16 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 			}
 			if (!ok) break;
 		}
-	} else {                                     /* 空闲池：有多少空闲 ID 就能发多少 */
-		uint32_t avail = __atomic_load_n(&c->idq_head, __ATOMIC_ACQUIRE) - tail;
-		n = can < (int)(avail / pack) ? can : (int)(avail / pack);
+	} else {
+		/*
+		 * 空闲池：环里初始只放 --window 个 ID，超时回收的也还回环，所以空闲 ID 数就是窗口余量，
+		 * 只需读 RX 侧的 idq_head 这一条 cache line，不用再读 done_txn / lost_txn
+		 */
+		n = div_pack((int)(__atomic_load_n(&c->idq_head, __ATOMIC_ACQUIRE) - tail), pack);
+		if (n > g_cfg.burst) n = g_cfg.burst;
 	}
-	if (n <= 0) return 0;                        /* 窗口满或 ID 被占 */
+	if (n <= 0) return 0;                        /* 窗口满或 ID 被占：不计 busy，也不读 TSC */
+	uint64_t t_s = rte_rdtsc();
 	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
 
 	uint64_t now = rte_rdtsc();
