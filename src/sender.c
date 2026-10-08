@@ -16,30 +16,21 @@
 #include "hwts.h"
 
 /*
- * 超时回收。与 RX 侧用原子交换抢清零，只有一方拿到 1。
- *   --id-seq：ID 按顺序分配，从 next_id 开始往后即由老到新（next_id 本身若仍在途，
- *             就是最老的那个——正是它挡住了分配）；遇到未超时的在途 ID 即停。
- *   空闲池：ID 不按年龄排列，扫全部；回收的 ID 放进 TX 本地 stash 复用。
+ * 超时回收，在 RX 侧做（每 tmo/16 扫一遍全部 ID）。
+ * outst[id] 只有两个写者且互斥：TX 把空闲 ID 置 1，RX 把在途 ID 清 0（收到响应或超时），
+ * 所以快路径不需要原子读改写。超时的 ID 与正常完成一样归还空闲池（--id-seq 时只清标志）。
  */
-static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now)
+static void reclaim(struct flow_ctx *c, struct port_stat *s, uint64_t now, uint32_t *head)
 {
-	const bool seq = g_cfg.id_seq;
-	uint32_t id = seq ? c->next_id : 0;
-	for (int i = 0; i < ID_SPACE; i++, id = (id + 1) & (ID_SPACE - 1)) {
+	uint64_t n = 0;
+	for (uint32_t id = 0; id < ID_SPACE; id++) {
 		if (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) continue;
-		if (now - c->ts[id] <= g_cfg.tmo_cyc) { if (seq) break; continue; }
-		if (__atomic_exchange_n(&c->outst[id], 0, __ATOMIC_ACQ_REL)) {
-			c->lost_txn++; s->lost++;
-			if (!seq) c->stash[c->nstash++] = (uint16_t)id;
-		}
+		if (now - c->ts[id] <= g_cfg.tmo_cyc) continue;
+		__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
+		if (!g_cfg.id_seq) c->idq[(*head)++ & (ID_SPACE - 1)] = (uint16_t)id;
+		n++;
 	}
-}
-
-/* 空闲池取一个 ID：先 stash，再环（调用方已确认数量足够） */
-static inline uint32_t id_pop(struct flow_ctx *c, uint32_t *tail)
-{
-	if (c->nstash) return c->stash[--c->nstash];
-	return c->idq[(*tail)++ & (ID_SPACE - 1)];
+	if (n) { s->lost += n; __atomic_store_n(&c->lost_txn, c->lost_txn + n, __ATOMIC_RELEASE); }
 }
 
 /* 发一批请求：受窗口与 ID 占用约束。返回发出的包数 */
@@ -52,12 +43,10 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 	uint64_t t_s = rte_rdtsc();
 
 	uint64_t done = __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE);
-	int can = (int)((uint64_t)g_cfg.window - (c->tx_txn - done - c->lost_txn)) / pack;
+	uint64_t lost = __atomic_load_n(&c->lost_txn, __ATOMIC_ACQUIRE);
+	int can = (int)((uint64_t)g_cfg.window - (c->tx_txn - done - lost)) / pack;
 	if (can > g_cfg.burst) can = g_cfg.burst;
 	const bool seq = g_cfg.id_seq;
-	const uint64_t tmo = g_cfg.tmo_cyc;
-	/* 空闲池：丢失的 ID 不会挡住分配，只是悄悄缩小窗口，所以定期回收，而不是等到发不出去 */
-	if (!seq && tmo && t_s - c->rc_last > tmo / 16) { c->rc_last = t_s; reclaim(c, s, t_s); }
 	uint32_t next_id = c->next_id;               /* 局部副本，批末写回 */
 	uint32_t tail = c->idq_tail;
 	int n = 0;
@@ -71,13 +60,10 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 			if (!ok) break;
 		}
 	} else {                                     /* 空闲池：有多少空闲 ID 就能发多少 */
-		uint32_t avail = __atomic_load_n(&c->idq_head, __ATOMIC_ACQUIRE) - tail + c->nstash;
+		uint32_t avail = __atomic_load_n(&c->idq_head, __ATOMIC_ACQUIRE) - tail;
 		n = can < (int)(avail / pack) ? can : (int)(avail / pack);
 	}
-	if (n <= 0) {                                /* 窗口满或 ID 被占：顺便检查超时 */
-		if (seq && tmo && t_s - c->rc_last > tmo / 16) { c->rc_last = t_s; reclaim(c, s, t_s); }
-		return 0;
-	}
+	if (n <= 0) return 0;                        /* 窗口满或 ID 被占 */
 	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
 
 	uint64_t now = rte_rdtsc();
@@ -86,7 +72,7 @@ static inline int tx_step(struct flow_ctx *c, struct port_stat *s)
 		for (int k = 0; k < pack; k++, p += txn_len) {
 			uint32_t id;
 			if (seq) { id = next_id; next_id = (id + 1) & (ID_SPACE - 1); }
-			else id = id_pop(c, &tail);
+			else id = c->idq[tail++ & (ID_SPACE - 1)];
 			axi_req_set_id(p, rd, id, beats);
 			c->ts[id] = now;
 			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
@@ -110,6 +96,13 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 {
 	struct rte_mbuf *rx[MAX_BURST];
 	uint64_t t_s = rte_rdtsc();
+	const bool pool = !g_cfg.id_seq;
+	if (g_cfg.tmo_cyc && t_s - c->rc_last > g_cfg.tmo_cyc / 16) {   /* 超时回收（收不到包时也要做） */
+		uint32_t h = c->idq_head;
+		c->rc_last = t_s;
+		reclaim(c, s, t_s, &h);
+		if (pool) __atomic_store_n(&c->idq_head, h, __ATOMIC_RELEASE);
+	}
 	uint16_t nr = rte_eth_rx_burst(c->port, c->q, rx, MAX_BURST);
 	if (nr == 0) return 0;
 	s->rx_hits++;
@@ -117,7 +110,6 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 	const uint16_t hl = hdr_len();
 	const uint64_t wdata = (uint64_t)g_cfg.beats * BEAT;
 	uint64_t now = rte_rdtsc(), done = 0;
-	const bool pool = !g_cfg.id_seq;
 	uint32_t head = c->idq_head;                 /* 空闲池：本批完成的 ID 写入环，批末一次发布 */
 	rxd_record(s, c->port, rx, nr, now);
 	for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rte_prefetch0(rte_pktmbuf_mtod(rx[i], void *));
@@ -146,9 +138,8 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		for (int j = 0; j < k; j++) {
 			uint32_t id = ids[j];
 			if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }   /* 重复 / 超时回收后迟到 */
-			uint64_t t0 = c->ts[id];             /* 清零前读：清零后 TX 可能立即复用并改写 ts */
-			if (!__atomic_exchange_n(&c->outst[id], 0, __ATOMIC_ACQ_REL)) { s->err++; continue; }  /* 刚被超时回收 */
-			hist_add(s, now - t0);
+			hist_add(s, now - c->ts[id]);        /* 清零前读：清零后 TX 可能立即复用并改写 ts */
+			__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
 			if (pool) c->idq[head++ & (ID_SPACE - 1)] = (uint16_t)id;
 			done++;
 			s->data_bytes += c->read ? data[j] : wdata;

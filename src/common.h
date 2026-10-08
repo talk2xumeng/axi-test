@@ -129,19 +129,17 @@ struct flow_ctx {
 	/*
 	 * 空闲 ID 池（默认）：RX 侧把完成的 ID 写入环 idq 并推进 idq_head，TX 侧从 idq_tail 取。
 	 * 系统里 ID 总数 = --window ≤ 511 < 环长 512，生产者不会追上消费者，TX 侧不用发布 tail。
-	 * 超时回收的 ID 由 TX 侧放进本地 stash，优先使用。
+	 * 超时回收在 RX 侧做，回收的 ID 同样写入环。
 	 */
 	uint16_t idq[ID_SPACE] __rte_cache_aligned;   /* RX 侧写 */
 	uint64_t tx_txn __rte_cache_aligned;  /* TX 侧写：累计发出事务数 */
 	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID（--id-seq） */
 	uint32_t idq_tail;                    /* TX 侧写：空闲环消费位置 */
-	uint16_t nstash;                      /* TX 侧写：stash 中的 ID 数 */
-	uint16_t stash[ID_SPACE];             /* TX 侧写：超时回收的 ID */
 	uint32_t txrr;                        /* TX 侧写：--txq 轮转起点 */
-	uint64_t lost_txn;                    /* TX 侧写：超时回收的事务数 */
-	uint64_t rc_last;                     /* TX 侧写：上次超时检查的 TSC */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */
 	uint32_t idq_head;                    /* RX 侧写：空闲环生产位置（release 发布） */
+	uint64_t lost_txn;                    /* RX 侧写：超时回收的事务数 */
+	uint64_t rc_last;                     /* RX 侧写：上次超时检查的 TSC */
 } __rte_cache_aligned;
 
 extern struct flow_ctx g_flow[MAX_FLOWS];
