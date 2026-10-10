@@ -55,11 +55,11 @@ void hdr_flow_addr(uint16_t port, uint16_t flow, uint16_t idx,
 	switch (g_cfg.hdr) {
 	case HDR_SUE:                    /* 全局第 idx 条流：本端 gpu_id + idx，对端 peer_gpu_id + idx */
 		sue_id_to_mac((uint16_t)(g_cfg.gpu_id + idx), &a->src);
-		sue_id_to_mac((uint16_t)((g_cfg.peer_gpu_id < 0 ? 0 : g_cfg.peer_gpu_id) + idx), &a->dst);
+		sue_id_to_mac((uint16_t)((g_cfg.peer_gpu_id < 0 ? 0 : g_cfg.peer_gpu_id) + (g_cfg.one_dmac ? 0 : idx)), &a->dst);
 		break;
-	default:
+	default:                         /* --one-dmac：各流 SMAC 仍按流派生，DMAC 都用对端基准地址 */
 		eth_flow_mac(port_mac, flow, &a->src);
-		eth_flow_mac(&g_cfg.peer_mac[port], flow, &a->dst);
+		eth_flow_mac(&g_cfg.peer_mac[port], g_cfg.one_dmac ? 0 : flow, &a->dst);
 		break;
 	}
 }

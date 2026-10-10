@@ -23,6 +23,15 @@ static inline void flush(struct flow_ctx *c, struct port_stat *s, struct rte_mbu
 	swd_add(s, rte_rdtsc() - t_rx, nt);   /* 停留时间：rx_burst 返回 → 响应 tx_burst 返回 */
 }
 
+/* 两个请求帧的源地址（SMAC 字段，eth / sue 头都在第 6~11 字节）是否相同 */
+static inline bool same_src(const uint8_t *a, const uint8_t *b)
+{
+	uint32_t a4, b4; uint16_t a2, b2;
+	memcpy(&a4, a + 6, 4); memcpy(&b4, b + 6, 4);
+	memcpy(&a2, a + 10, 2); memcpy(&b2, b + 10, 2);
+	return a4 == b4 && a2 == b2;
+}
+
 /* 合并写响应包收尾：交换地址、写头、定长 */
 static inline void b_finish(struct rte_mbuf *bm, uint16_t n, uint16_t hl)
 {
@@ -92,8 +101,11 @@ int reflector_loop(void *arg)
 					m->data_len = m->pkt_len = (uint32_t)(hl + plen);
 					tx[nt++] = m;
 				} else {
-					/* 同一批收到的写请求，B 合并进同一个响应包（VC2 每包 ≤ 16），不额外等待 */
-					if (bm && bn + k > bpack) { b_finish(bm, bn, hl); tx[nt++] = bm; bm = NULL; }
+					/* 同一批收到的、同一源地址的写请求，B 合并进同一个响应包（VC2 每包 ≤ 16），不额外等待。
+					 * 响应只回给 bm 的源地址；源地址不同（如发送端 --one-dmac 多流）时另起一包 */
+					if (bm && (bn + k > bpack || !same_src(f, rte_pktmbuf_mtod(bm, const uint8_t *)))) {
+						b_finish(bm, bn, hl); tx[nt++] = bm; bm = NULL;
+					}
 					if (!bm) { bm = m; bn = 0; }     /* ID 已取出，本包 payload 可覆盖 */
 					else fr[nf++] = m;
 					axi_b_build(rte_pktmbuf_mtod(bm, uint8_t *) + hl + bn * B_RSP, ids, k);
