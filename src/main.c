@@ -44,40 +44,96 @@ uint16_t g_nb_ports, g_nb_flows;
 
 static void usage(void)
 {
-	printf(
-	"axiperf [EAL 参数] -- [选项]\n"
-	"  通用：\n"
-	"    --mode sender|reflector   角色（默认 sender）\n"
-	"    --op write|read|mix|rw    sender：写 / 读 / 读写并发（mix：偶数号流写、奇数号流读；rw：每条流同一 MAC 上同时读写，写、读各一套 ID / 队列 / 核，两端都要设）（默认 write）\n"
-	"    --window N                每条流在途事务上限 1~511（默认 511）\n"
-	"    --pack N                  每请求包事务数（写：pack×beats≤8；读：≤4）（默认 2）\n"
-	"    --rpack N                 读请求每包事务数 1~4，mix / rw 时读写可分别设置（默认同 --pack）\n"
-	"    --beats N                 每事务拍数 1~4（默认 4）\n"
-	"    --burst N                 收发 burst 1~64（默认 32）\n"
-	"    --flows N                 每端口流数 1~16（默认 1）\n"
-	"    --nosplit                 sender：每条流单核收发（默认收发分核）\n"
-	"    --time SEC                运行秒数（默认直到 Ctrl-C）\n"
-	"    --timeout-us N            sender：事务超时回收，记入 lost（默认 10000，0 为不回收）\n"
-	"    --drop-every N            reflector：每 N 个请求包丢 1 个，用于验证丢包处理（默认 0）\n"
-	"    --b-pack N                reflector：同一批写请求的 B 合并进一个响应包，每包最多 N 个（1~16，默认 1）\n"
-	"    --hwts                    开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd 列，两端都可用）\n"
-	"    --tx-cores N              sender：每条流的发送核数 1~4，每核独占一个发送队列和一段 ID（窗口均分），同一 MAC、同一接收核（默认 1）\n"
-	"    --id-seq                  sender：ID 按顺序分配（旧方式）；默认用空闲 ID 池，完成即可复用，不被最老的在途 ID 挡住\n"
-	"    --dump N                  打印前 N 帧十六进制\n"
-	"    --pcap FILE               抓包模式：收 / 发的 AXI 帧写入 pcap\n"
-	"    --pcap-count N            抓包模式最多写入帧数（默认 1000）\n"
-	"  以太头：\n"
-	"    --hdr eth|sue             头格式（默认 eth）\n"
-	"    --vid N                   802.1Q VID（默认 0）\n"
-	"    --promisc                 强制混杂模式（默认 eth 头只收本端各流 MAC）\n"
-	"  eth 头：\n"
-	"    --dmac PORT,MAC           sender：对端网卡真实 MAC，可重复\n"
-	"  sue 头（试验性）：\n"
-	"    --gpu-id N                本端 GPU ID 基址，流 k 用 N+k（必填）\n"
-	"    --peer-gpu-id N           sender：对端 GPU ID 基址（必填）\n"
-	"    --sue-ethertype X         EtherType（默认 0x88B5）\n"
-	"    --sue-format N            Format[2:0]（默认 0）\n"
-	"    --sue-pkttype N           PktType[4:0]（默认 0）\n");
+	fputs(
+	"axiperf — AXI over Ethernet 吞吐与 RTT 测试\n"
+	"\n"
+	"用法\n"
+	"  ./axiperf -l <CPU列表> -a <网卡BDF> -- <测试参数>\n"
+	"  ./axiperf --help                 查看本帮助，不初始化 DPDK / 网卡\n"
+	"  ./axiperf -- --help              同上；也支持 -h\n"
+	"  分隔符 -- 前是 DPDK EAL 参数，后是 axiperf 参数。\n"
+	"\n"
+	"快速开始（请替换 BDF、CPU 和对端 MAC；两端使用相同 VID / flows）\n"
+	"  反射端：\n"
+	"    ./axiperf -l 0-1 -a 0000:12:00.0 -- --mode reflector --vid 1\n"
+	"  单流写：\n"
+	"    ./axiperf -l 0-2 -a 0000:12:00.0 -- --mode sender --op write \\\n"
+	"      --vid 1 --dmac 0,aa:bb:cc:dd:ee:ff --time 10\n"
+	"  单流读：在上述发送端命令中把 --op write 改为 --op read。\n"
+	"  同 MAC 读写：两端都加 --op rw；默认 sender 至少 5 核，reflector 至少 3 核。\n"
+	"\n"
+	"角色与流量\n"
+	"  --mode sender|reflector   sender 发请求并统计 RTT；reflector 回响应 [sender]\n"
+	"  --op write|read|mix|rw    [write]\n"
+	"      write  只写；read 只读（reflector 自动识别读 / 写请求）\n"
+	"      mix    偶数号流写、奇数号流读；至少 2 流才能同时包含读写\n"
+	"      rw     同一 MAC 同时读写，各自一套窗口 / ID / 队列；两端必须设置\n"
+	"  --flows N                每端口 MAC 流数，1~16 [1]\n"
+	"  --time SEC               测试时长；0 表示直到 Ctrl-C [0]\n"
+	"\n"
+	"发送端：窗口、报文和 CPU\n"
+	"  --window N               每个读 / 写上下文在途事务数，1~511 [511]\n"
+	"  --pack N                 每请求包事务数 [2]\n"
+	"                            写要求 pack×beats≤8；读最多 4 个事务\n"
+	"  --rpack N                单独设置读请求每包事务数，1~4 [跟随 --pack]\n"
+	"  --beats N                每事务 64B beat 数，1~4 [4，即 256B 数据]\n"
+	"  --burst N                发送批量 / 反射端响应提交阈值，1~64 [32]\n"
+	"                            RX 每次轮询最多取 64 包，不随此参数改变\n"
+	"  --tx-cores N             每个上下文发送核数，1~4；窗口均分 [1]\n"
+	"                            多核共用同一 MAC / RX 核，各核独占 TX 队列\n"
+	"                            N>1 不能与 --nosplit / --id-seq 同用\n"
+	"  --nosplit                每个上下文由同一核收发 [默认收发分核]\n"
+	"  --id-seq                 按顺序分配 ID [默认空闲 ID 池，完成即可复用]\n"
+	"  --timeout-us N           超时回收并计入 lost；0 禁用 [10000]\n"
+	"  CPU 数（含 1 个统计核）：\n"
+	"      上下文数 = 端口数×flows×(rw 模式为 2，否则为 1)\n"
+	"      sender 默认 = 1+上下文数×(tx-cores+1)\n"
+	"      sender --nosplit / reflector = 1+上下文数\n"
+	"\n"
+	"反射端\n"
+	"  --b-pack N               B 写响应合并上限，1~16 [1：每请求包一个响应包]\n"
+	"                            只合并当前 RX 批次，不额外等待凑包\n"
+	"  --drop-every N           每 N 个请求包丢 1 个，用于丢包测试；0 禁用 [0]\n"
+	"\n"
+	"二层地址与封装（无需 IP / ARP）\n"
+	"  --hdr eth|sue            eth：VLAN + 802.3 Length；sue 为试验性 [eth]\n"
+	"  --vid N                  VLAN ID；两端保持一致 [0]\n"
+	"  --dmac PORT,MAC          eth sender 的对端基准 MAC，可为各端口重复设置\n"
+	"                            PORT 是 DPDK 端口号，如 0；不是 PCI BDF\n"
+	"                            默认 02:00:00:00:01:0PORT；测试时请显式设置\n"
+	"  --promisc                强制混杂接收 [默认仅接收本端各流 MAC]\n"
+	"\n"
+	"诊断与抓包（性能对比时建议关闭）\n"
+	"  --hwts                   开启 RX 硬件时间戳，统计网卡接收→CPU取包时延\n"
+	"  --dump N                 打印前 N 帧十六进制 [0]\n"
+	"  --pcap FILE              保存程序收 / 发的 AXI 帧 [关闭]\n"
+	"  --pcap-count N           整个进程合计抓包帧数上限 [1000]\n"
+	"\n"
+	"SUE 试验性参数（--hdr sue）\n"
+	"  --gpu-id N               本端 GPU ID 基址，流 k 使用 N+k [必填]\n"
+	"  --peer-gpu-id N          sender 的对端 GPU ID 基址 [必填]\n"
+	"  --sue-ethertype X        EtherType，须 >1500 [0x88B5]\n"
+	"  --sue-format N           Format[2:0] [0]\n"
+	"  --sue-pkttype N          PktType[4:0] [0]\n"
+	"\n"
+	"[方括号] 表示默认值。Ctrl-C 正常结束；再次 Ctrl-C 强制退出。\n"
+	, stdout);
+}
+
+/* 帮助无需 hugepages、网卡探测或运行权限；EAL 参数仍交由 EAL 解析。 */
+static bool help_requested(int argc, char **argv)
+{
+	if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) return true;
+	bool app = false;
+	for (int i = 1; i < argc; i++) {
+		if (!app) { if (!strcmp(argv[i], "--")) app = true; continue; }
+		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) return true;
+		/* 以下为不取值的应用选项；其他长选项的下一项是它的值。 */
+		if (!strcmp(argv[i], "--nosplit") || !strcmp(argv[i], "--id-seq") ||
+		    !strcmp(argv[i], "--hwts") || !strcmp(argv[i], "--promisc")) continue;
+		if (!strncmp(argv[i], "--", 2) && !strchr(argv[i], '=') && i + 1 < argc) i++;
+	}
+	return false;
 }
 
 enum {
@@ -104,7 +160,7 @@ static void parse_args(int argc, char **argv)
 		memcpy(&g_cfg.peer_mac[i], d, 6);
 	}
 	int o;
-	while ((o = getopt_long(argc, argv, "", lo, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "h", lo, NULL)) != -1) {
 		switch (o) {
 		case OPT_MODE:    g_cfg.sender = strcmp(optarg, "reflector") != 0; break;
 		case OPT_OP:
@@ -145,6 +201,7 @@ static void parse_args(int argc, char **argv)
 			int pi = atoi(optarg); char *mac = strchr(optarg, ',');
 			if (!mac || pi < 0 || pi >= MAX_PORTS || rte_ether_unformat_addr(mac + 1, &g_cfg.peer_mac[pi]) < 0) { usage(); exit(1); }
 			break; }
+		case 'h':
 		case OPT_HELP: usage(); exit(0);
 		default: usage(); exit(1);
 		}
@@ -183,6 +240,7 @@ static int worker_main(void *arg)       /* 单核模式：sender 或 reflector *
 
 int main(int argc, char **argv)
 {
+	if (help_requested(argc, argv)) { usage(); return 0; }
 	int ret = rte_eal_init(argc, argv);
 	if (ret < 0) rte_exit(EXIT_FAILURE, "EAL init failed\n");
 	parse_args(argc - ret, argv + ret);
