@@ -17,6 +17,10 @@ build:
 	mkdir -p build
 
 clean:
-	rm -rf build $(APP)
+	rm -rf build $(APP) rndq
 
 .PHONY: clean
+
+# RANDOM 分队列探针（需带 RTE_FLOW_ITEM_TYPE_RANDOM 的 DPDK，如 DOCA 22.11）
+rndq: tools/rndq.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDLIBS)
