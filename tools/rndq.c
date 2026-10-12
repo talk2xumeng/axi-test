@@ -3,8 +3,7 @@
  *
  * 收端（--rx N，N 为 2 的幂）：
  *   group 0：DMAC == 本网卡 MAC → JUMP group 1
- *   group 1：N 张模板表（mlx5 限制每表 nb_flows = 1），表 i：随机值 & (N-1) == i → 队列 i
- *   --one-table：改为 1 张表放 N 条规则，用来确认 nb_flows = 1 的限制是否存在
+ *   group 1 起：随机值二叉树，每层 random & 1 == 0 走左、否则走右，log2(N) 层后各 1/N（见 setup_rules）
  *   --no-random：group 0 直接送队列 0，作单队列对照
  *   每个队列一个核，只收包计数后释放。需 devargs dv_flow_en=2（HW steering，只能用模板 / 异步 API）。
  * 发端（--tx M）：M 个核各占一个发送队列，循环发与 axiperf 写请求同格式的帧
@@ -41,7 +40,7 @@ struct rte_flow_item_random { uint32_t value; };
 
 static volatile bool quit;
 static struct {
-	bool tx, one_table, no_random, isolate;
+	bool tx, no_random, isolate;
 	int nq, time, vid, len;
 	struct rte_ether_addr dmac;
 } cfg = { .nq = 4, .time = 20, .vid = 1, .len = 566 };
@@ -62,7 +61,6 @@ static void usage(void)
 	       "  --vid N         VLAN ID [1]\n"
 	       "  --len N         帧长，含 FCS [566]\n"
 	       "  --time S        运行秒数 [20]\n"
-	       "  --one-table     收端：1 张表放 N 条规则（检查 nb_flows=1 限制）\n"
 	       "  --no-random     收端：不分流，全部进队列 0（对照）\n"
 	       "  --isolate       收端：rte_flow_isolate，去掉驱动默认规则\n"
 	       "lcore 数须 ≥ 1 + N（或 M）：第一个 lcore 打印统计，其余各管一个队列\n", MAXQ);
@@ -70,10 +68,10 @@ static void usage(void)
 
 static void parse(int argc, char **argv)
 {
-	enum { O_RX = 256, O_TX, O_DMAC, O_VID, O_LEN, O_TIME, O_ONE, O_NORND, O_ISO };
+	enum { O_RX = 256, O_TX, O_DMAC, O_VID, O_LEN, O_TIME, O_NORND, O_ISO };
 	static const struct option lo[] = {
 		{"rx", 1, 0, O_RX}, {"tx", 1, 0, O_TX}, {"dmac", 1, 0, O_DMAC}, {"vid", 1, 0, O_VID},
-		{"len", 1, 0, O_LEN}, {"time", 1, 0, O_TIME}, {"one-table", 0, 0, O_ONE},
+		{"len", 1, 0, O_LEN}, {"time", 1, 0, O_TIME},
 		{"no-random", 0, 0, O_NORND}, {"isolate", 0, 0, O_ISO}, {0, 0, 0, 0}};
 	int o, mode = 0;
 	while ((o = getopt_long(argc, argv, "", lo, NULL)) != -1) {
@@ -84,14 +82,13 @@ static void parse(int argc, char **argv)
 		case O_VID:   cfg.vid = atoi(optarg) & 0xFFF; break;
 		case O_LEN:   cfg.len = atoi(optarg); break;
 		case O_TIME:  cfg.time = atoi(optarg); break;
-		case O_ONE:   cfg.one_table = true; break;
 		case O_NORND: cfg.no_random = true; break;
 		case O_ISO:   cfg.isolate = true; break;
 		default: usage(); exit(1);
 		}
 	}
 	if (mode != 1 || cfg.nq < 1 || cfg.nq > MAXQ || cfg.len < 64 || cfg.len > 1518 ||
-	    (!cfg.tx && (cfg.nq & (cfg.nq - 1)))) {
+	    (!cfg.tx && ((cfg.nq & (cfg.nq - 1)) || (cfg.nq == 1 && !cfg.no_random)))) {
 		usage(); exit(1);
 	}
 }
@@ -184,33 +181,59 @@ static int setup_rules(void)
 	if (async_rule(t0, r0, cfg.no_random ? ra_q0 : a_jump, "group 0 规则") < 0) return -1;
 	if (cfg.no_random) { printf("--no-random：DMAC 匹配后全部进队列 0\n"); return 0; }
 
-	/* group 1：随机值低位分流 */
-	struct rte_flow_item_random rnd_m = { .value = (uint32_t)(cfg.nq - 1) };
+	/*
+	 * group 1 起：随机值分流。mlx5 每查一张表重新取一次随机值，所以 N 张表各匹配 random & (N-1) == i
+	 * 会得到 1/4、3/16、9/64… 的几何分布，且约 (3/4)^N 的包一张都不中而被丢（10-12 03 实测）。
+	 * 改为二叉树：每个节点一个 group、两张表——
+	 *   优先级 0：random & 1 == 0 → 左子（1/2）；优先级 1：全匹配 → 右子（其余 1/2）。
+	 * 每层独立 1/2，log2(N) 层后各队列 1/N，且每个包都有去处。
+	 * 节点按堆编号：根 = group 1，节点 n 的子节点 2n、2n+1；n ≥ N 为叶子 = 队列 n − N。
+	 */
+	struct rte_flow_item_random rnd_m = { .value = 1 };
 	const struct rte_flow_item p1[] = {
 		{ .type = RTE_FLOW_ITEM_TYPE_RANDOM, .mask = &rnd_m }, { .type = RTE_FLOW_ITEM_TYPE_END } };
 	struct rte_flow_pattern_template *pt1 = rte_flow_pattern_template_create(port, &pa, p1, &e);
 	if (!pt1) return ferr("random pattern template", -rte_errno, &e);
+	struct rte_flow_item_eth any_m;                        /* 全匹配：ETH 掩码全 0 */
+	memset(&any_m, 0, sizeof(any_m));
+	const struct rte_flow_item pany[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .mask = &any_m }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+	struct rte_flow_pattern_template *ptany = rte_flow_pattern_template_create(port, &pa, pany, &e);
+	if (!ptany) return ferr("match-all pattern template", -rte_errno, &e);
+	const struct rte_flow_action a_j[] = {                 /* 掩码 conf 为空：跳转目标由每条规则给出 */
+		{ .type = RTE_FLOW_ACTION_TYPE_JUMP }, { .type = RTE_FLOW_ACTION_TYPE_END } };
+	struct rte_flow_actions_template *at_j = rte_flow_actions_template_create(port, &aa, a_j, a_j, &e);
+	if (!at_j) return ferr("jump(any) actions template", -rte_errno, &e);
 
-	struct rte_flow_template_table *t1 = NULL;
-	if (cfg.one_table && !(t1 = table(1, 0, (uint32_t)cfg.nq, pt1, at_q, "random table（1 张，N 条规则）"))) return -1;
-	for (int i = 0; i < cfg.nq; i++) {
-		char what[64];
-		struct rte_flow_template_table *t = t1;
-		if (!t) {
-			snprintf(what, sizeof(what), "random table %d", i);
-			if (!(t = table(1, (uint32_t)i, 1, pt1, at_q, what))) return -1;
+	struct rte_flow_item_random rnd_s = { .value = 0 };
+	const struct rte_flow_item r_rnd[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_RANDOM, .spec = &rnd_s }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+	struct rte_flow_item_eth any_s;
+	memset(&any_s, 0, sizeof(any_s));
+	const struct rte_flow_item r_any[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .spec = &any_s }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+
+	const int N = cfg.nq;
+	for (int n = 1; n < N; n++) {                          /* 内部节点 */
+		for (int side = 0; side < 2; side++) {
+			const int child = 2 * n + side;
+			const bool leaf = child >= N;
+			char what[64];
+			snprintf(what, sizeof(what), "group %d %s表", n, side ? "全匹配" : "random ");
+			struct rte_flow_template_table *t = table((uint32_t)n, (uint32_t)side, 1, side ? ptany : pt1,
+			                                          leaf ? at_q : at_j, what);
+			if (!t) return -1;
+			struct rte_flow_action_queue qa = { .index = (uint16_t)(child - N) };
+			struct rte_flow_action_jump ja = { .group = (uint32_t)child };
+			const struct rte_flow_action act[] = {
+				{ .type = leaf ? RTE_FLOW_ACTION_TYPE_QUEUE : RTE_FLOW_ACTION_TYPE_JUMP,
+				  .conf = leaf ? (const void *)&qa : (const void *)&ja },
+				{ .type = RTE_FLOW_ACTION_TYPE_END } };
+			snprintf(what, sizeof(what), "group %d %s规则", n, side ? "全匹配" : "random ");
+			if (async_rule(t, side ? r_any : r_rnd, act, what) < 0) return -1;
 		}
-		struct rte_flow_item_random rnd_s = { .value = (uint32_t)i };
-		struct rte_flow_action_queue qi = { .index = (uint16_t)i };
-		const struct rte_flow_item ri[] = {
-			{ .type = RTE_FLOW_ITEM_TYPE_RANDOM, .spec = &rnd_s }, { .type = RTE_FLOW_ITEM_TYPE_END } };
-		const struct rte_flow_action ai[] = {
-			{ .type = RTE_FLOW_ACTION_TYPE_QUEUE, .conf = &qi }, { .type = RTE_FLOW_ACTION_TYPE_END } };
-		snprintf(what, sizeof(what), "random 规则 %d", i);
-		if (async_rule(t, ri, ai, what) < 0) return -1;
 	}
-	printf("group 1：%d 个队列，随机值 & 0x%x 分流（%s）\n", cfg.nq, cfg.nq - 1,
-	       cfg.one_table ? "1 张表 N 条规则" : "N 张表各 1 条规则");
+	printf("随机值二叉树分流：%d 个队列，group 1~%d，每层 1/2\n", N, N - 1);
 	return 0;
 }
 
@@ -333,6 +356,21 @@ int main(int argc, char **argv)
 	if (rte_eth_stats_get(port, &es) == 0)
 		printf("网卡计数：ipackets %" PRIu64 " imissed %" PRIu64 " ierrors %" PRIu64 " rx_nombuf %" PRIu64 " opackets %" PRIu64 "\n",
 		       es.ipackets, es.imissed, es.ierrors, es.rx_nombuf, es.opackets);
+	/* 网卡扩展计数：物理口收到多少、在哪丢（rx_packets_phy、rx_discards_phy、rx_out_of_buffer 等） */
+	int nx = rte_eth_xstats_get_names(port, NULL, 0);
+	if (nx > 0) {
+		struct rte_eth_xstat_name *nm = calloc((size_t)nx, sizeof(*nm));
+		struct rte_eth_xstat *xv = calloc((size_t)nx, sizeof(*xv));
+		if (nm && xv && rte_eth_xstats_get_names(port, nm, (unsigned)nx) == nx && rte_eth_xstats_get(port, xv, (unsigned)nx) == nx) {
+			static const char *keys[] = { "phy", "discard", "out_of_buffer", "miss", "drop", "steer", NULL };
+			for (int i = 0; i < nx; i++) {
+				if (!xv[i].value) continue;
+				for (const char **k = keys; *k; k++)
+					if (strstr(nm[xv[i].id].name, *k)) { printf("  %-36s %" PRIu64 "\n", nm[xv[i].id].name, xv[i].value); break; }
+			}
+		}
+		free(nm); free(xv);
+	}
 	rte_eth_dev_stop(port);
 	rte_eal_cleanup();
 	return 0;
