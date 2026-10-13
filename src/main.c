@@ -34,7 +34,7 @@
 
 struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
-	.time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
+	.rxd = NB_RXD, .time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
 	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1, .tx_cores = 1,
 	.sue_ethertype = 0x88B5, .sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
 };
@@ -103,6 +103,7 @@ static void usage(void)
 	"                            默认 02:00:00:00:01:0PORT；测试时请显式设置\n"
 	"  --one-dmac               sender 各流请求都发往 --dmac 给出的同一个 MAC，不按流派生\n"
 	"                            （多源 MAC → 单一目的 MAC；反射端用 --flows 1）\n"
+	"  --rxd N                  每个接收队列的描述符数，2 的幂、64~32768 [1024]；--rx-split 高包率时建议 4096\n"
 	"  --rx-split N             reflector：同一对 MAC 的请求由网卡按随机值均分到 N 个接收队列，各一个核\n"
 	"                            （N = 2/4/8/16；经 E100c 后只有一对 MAC、一个 VID 时用）；不能与 --flows 同用\n"
 	"                            devargs 须加 dv_flow_en=2，并用多流 devargs（mprq_en=1、rxq_cqe_comp_en=1）\n"
@@ -144,7 +145,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -158,7 +159,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -185,6 +186,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_PROMISC: g_cfg.promisc = true; break;
 		case OPT_ONEDMAC: g_cfg.one_dmac = true; break;
 		case OPT_RXSPLIT: g_cfg.rx_split = (int)num(optarg); break;
+		case OPT_RXD:     g_cfg.rxd = (int)num(optarg); break;
 		case OPT_TIMEOUT: g_cfg.timeout_us = (uint32_t)num(optarg); break;
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
@@ -213,6 +215,7 @@ static void parse_args(int argc, char **argv)
 		default: usage(); exit(1);
 		}
 	}
+	if (g_cfg.rxd < 64 || g_cfg.rxd > 32768 || (g_cfg.rxd & (g_cfg.rxd - 1))) { printf("--rxd 须为 2 的幂、64~32768\n"); exit(1); }
 	if (g_cfg.rx_split) {
 		const int n = g_cfg.rx_split;
 		if (g_cfg.sender || g_cfg.hdr != HDR_ETH || g_cfg.fpp != 1 || n < 2 || n > MAX_FPP || (n & (n - 1)) ||

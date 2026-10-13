@@ -254,7 +254,7 @@ void port_init(uint16_t pi)
 	check_devargs(pi);
 	int socket = rte_eth_dev_socket_id(pi);
 	const int m = ctx_per_flow();
-	uint16_t nrxd = NB_RXD, ntxd = NB_TXD, nf = (uint16_t)g_cfg.fpp, nq = (uint16_t)(nf * m);   /* nf：流（MAC）数；nq：队列数 */
+	uint16_t nrxd = (uint16_t)g_cfg.rxd, ntxd = NB_TXD, nf = (uint16_t)g_cfg.fpp, nq = (uint16_t)(nf * m);   /* nf：流（MAC）数；nq：队列数 */
 	char name[32];
 	struct rte_ether_addr pmac;
 	struct rte_eth_conf conf; memset(&conf, 0, sizeof(conf));   /* 不开 VLAN strip */
@@ -280,7 +280,7 @@ void port_init(uint16_t pi)
 		hdr_flow_addr(pi, f, mf, &pmac, &c->addr);
 
 		snprintf(name, sizeof(name), "rx%u_%u", pi, q);
-		c->rx_pool = rte_pktmbuf_pool_create(name, RX_POOL_N, POOL_CACHE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, socket);
+		c->rx_pool = rte_pktmbuf_pool_create(name, RTE_MAX((unsigned)RX_POOL_N, 2u * (unsigned)g_cfg.rxd + 4095u), POOL_CACHE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, socket);
 		if (!c->rx_pool) rte_exit(EXIT_FAILURE, "rx pool %u.%u\n", pi, q);
 		if (rte_eth_rx_queue_setup(pi, q, nrxd, socket, NULL, c->rx_pool) < 0)
 			rte_exit(EXIT_FAILURE, "port %u rx queue %u setup failed\n", pi, q);

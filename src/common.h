@@ -68,6 +68,7 @@ struct config {
 	int    tx_cores;             /* sender：每条流的发送核数 1~4，每核独占一个发送队列和一段 ID（默认 1） */
 	bool   promisc;
 	bool   one_dmac;             /* sender：各流请求都发往 --dmac 给出的同一个地址，不按流派生 */
+	int    rxd;                  /* 每个接收队列的描述符数（默认 NB_RXD）；MPRQ 时为 stride 总数，WQE 数 = rxd >> mprq_log_stride_num */
 	int    rx_split;             /* reflector：一对 MAC 的请求按网卡随机值分到 N 个接收队列 / 核（0 = 不分）；
 	                                解析后 fpp = N，N 个上下文共用网卡 MAC */
 	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
