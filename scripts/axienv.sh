@@ -21,7 +21,9 @@
 # 同上，反射端由网卡按随机值把这一对 MAC 的请求均分到 N 个核（--rx-split，HW steering）：
 #   反射端: refls <N> [额外参数]                         例: refls 4 / refls 8 / refls 4 --op rw（写、读各 N 核）
 #   发送端: sndm 1 --op write --one-dmac --window 64
-#   反射端用 SPLIT 预设（多流 devargs + dv_flow_en=2；关 CQE 压缩时网卡只能收约 46 Mpps）。
+#   反射端用 SPLIT 预设（多流 devargs + dv_flow_en=2；关 CQE 压缩时网卡只能收约 46 Mpps；不开 MPRQ 时 RTT 约高 2.9 µs），
+#   接收环 --rxd 4096（RXD= 可改；1024 + MPRQ 每队列只有 2 个 WQE，满载会 imissed）。
+#   10-13 实测：refls 8、8 流 × 511 在途写 75.8 Mpps / 343 G，无丢包，各核约 72%。
 BDF=${BDF:-0000:33:00.0}
 PEER=${PEER:-0,a0:88:c2:76:cc:0c}
 BDF12=${BDF12:-0000:12:00.0}                 # 多流双卡用
@@ -66,7 +68,7 @@ refls() { local n=$1; shift; [ -n "$n" ] || { echo "用法: refls <N> [额外参
   local k=$n d; case " $* " in *" --op rw "*) k=$((n * 2));; esac
   [ "$k" -le 16 ] || { echo "上下文 $k 个超过 16" >&2; return 1; }
   d=$(da "${D:-SPLIT}") || return 1
-  local c="$AXI --huge-unlink -l 23,24-$((23 + k)) -a $BDF,$d -- --mode reflector --vid $VID --rx-split $n --burst 16 --b-pack 16 $*"
+  local c="$AXI --huge-unlink -l 23,24-$((23 + k)) -a $BDF,$d -- --mode reflector --vid $VID --rx-split $n --rxd ${RXD:-4096} --burst 16 --b-pack 16 $*"
   echo "+ $c"; $c; }
 
 sndm() { local nic=$1; shift; local dev n lc k mac; dev=$(mdev "$nic") || return 1; n=$(nctx "$nic" "$@")
