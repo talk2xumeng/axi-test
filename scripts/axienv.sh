@@ -24,6 +24,13 @@
 #   反射端用 SPLIT 预设（多流 devargs + dv_flow_en=2；关 CQE 压缩时网卡只能收约 46 Mpps；不开 MPRQ 时 RTT 约高 2.9 µs），
 #   接收环 --rxd 4096（RXD= 可改；1024 + MPRQ 每队列只有 2 个 WQE，满载会 imissed）。
 #   10-13 实测：refls 8、8 流 × 511 在途写 75.8 Mpps / 343 G，无丢包，各核约 72%。
+#
+# E100c 等效（总在途 512 ≈ 511 个共享 ID，包率约 20–30 Mpps）：两端都用低时延 devargs（关 CQE 压缩、关 MPRQ），
+# 吞吐 = 512 ÷ RTT，RTT 每少 1 µs 吞吐约多 8%。10-13 实测（带 --hwts）：写 p50 11.5 µs / 双向 106 G，
+# 读 11.2 µs / 104.5 G，读写并发 写 14.8、读 12.85 µs / 169.9 G。
+#   反射端: D=LAT refls 8                      （读写并发：D=LAT refls 4 --op rw）
+#   发送端: D=SINGLE sndm 1 --op write --one-dmac --window 64      （读：--op read --rpack 4；读写并发：--op rw --rpack 4）
+#   不限在途、压反射端吞吐时改回默认（反射端 SPLIT、发送端 MULTI）：关压缩时网卡约 46 Mpps 即丢包。
 BDF=${BDF:-0000:33:00.0}
 PEER=${PEER:-0,a0:88:c2:76:cc:0c}
 BDF12=${BDF12:-0000:12:00.0}                 # 多流双卡用
@@ -38,9 +45,10 @@ DA_A="txq_inline_mpw=1024,txq_inline_max=1024,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
 DA_B="txq_inline_mpw=128,txq_mpw_en=0,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                          # 实验 B：关 eMPW
 DA_MULTI="mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"   # 多流
 
-DA_SPLIT="dv_flow_en=2,$DA_MULTI"                                                                                    # 反射端 --rx-split
+DA_SPLIT="dv_flow_en=2,$DA_MULTI"
+DA_LAT="dv_flow_en=2,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                    # 反射端 --rx-split 低时延（≤ 约 40 Mpps）                                                                                    # 反射端 --rx-split
 
-da() { local v="DA_$1"; [ -n "$1" ] && [ -n "${!v}" ] || { echo "未知预设: '$1'（可用: SINGLE A B MULTI SPLIT）" >&2; return 1; }; echo "${!v}"; }
+da() { local v="DA_$1"; [ -n "$1" ] && [ -n "${!v}" ] || { echo "未知预设: '$1'（可用: SINGLE A B MULTI SPLIT LAT）" >&2; return 1; }; echo "${!v}"; }
 
 refl() { local d; d=$(da "$1") || return 1; shift
   local c="$AXI -l ${RL:-23,24} -a $BDF,$d -- --mode reflector --vid $VID --b-pack 16 --hwts $*"

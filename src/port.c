@@ -237,9 +237,9 @@ static void check_devargs(uint16_t pi)
 	else if (single && !cqe_off)
 		why = "rxq_cqe_comp_en=0（单流关 CQE 压缩，满载 RTT 约低 3.5 µs）";
 	else if (!single && !mprq)
-		why = "mprq_en=1（多流时发送端要高包率收小包）";
+		why = "mprq_en=1（多流高包率时须开；总包率在约 40 Mpps 以下、要低时延时可不开，如总在途 512 的 E100c 等效测试）";
 	else if (!single && cqe_off)
-		why = "rxq_cqe_comp_en=1（多流须开 CQE 压缩，关闭时单卡包率约降到 45 Mpps）";
+		why = "rxq_cqe_comp_en=1（多流高包率时须开，关闭时单卡约 46 Mpps 即丢包；总包率低、要低时延时可关，满载 RTT 约低 2 µs）";
 	if (g_cfg.rx_split && !strstr(a, "dv_flow_en=2"))
 		rte_exit(EXIT_FAILURE, "port %u（%s）：--rx-split 需要 HW steering，devargs 须加 dv_flow_en=2，例如 -a <BDF>,dv_flow_en=2,%s\n",
 		         pi, rte_dev_name(di.device), DEV_MULTI);
