@@ -17,6 +17,11 @@
 #   发送端: sndm 1 --op write --one-dmac --window 64     （8 流 × 64 ≈ E100c 共享的 511 个 ID）
 #   发送端各流 SMAC 仍不同，请求的 DMAC 都是反射端网卡 MAC；反射端交换 MAC 回给各流，
 #   写响应只合并同一源 MAC 的请求。
+#
+# 同上，反射端由网卡按随机值把这一对 MAC 的请求均分到 N 个核（--rx-split，HW steering）：
+#   反射端: refls <N> [额外参数]                         例: refls 4 / refls 8 / refls 4 --op rw（写、读各 N 核）
+#   发送端: sndm 1 --op write --one-dmac --window 64
+#   反射端用 SPLIT 预设（多流 devargs + dv_flow_en=2；关 CQE 压缩时网卡只能收约 46 Mpps）。
 BDF=${BDF:-0000:33:00.0}
 PEER=${PEER:-0,a0:88:c2:76:cc:0c}
 BDF12=${BDF12:-0000:12:00.0}                 # 多流双卡用
@@ -31,7 +36,9 @@ DA_A="txq_inline_mpw=1024,txq_inline_max=1024,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
 DA_B="txq_inline_mpw=128,txq_mpw_en=0,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                          # 实验 B：关 eMPW
 DA_MULTI="mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"   # 多流
 
-da() { local v="DA_$1"; [ -n "$1" ] && [ -n "${!v}" ] || { echo "未知预设: '$1'（可用: SINGLE A B MULTI）" >&2; return 1; }; echo "${!v}"; }
+DA_SPLIT="dv_flow_en=2,$DA_MULTI"                                                                                    # 反射端 --rx-split
+
+da() { local v="DA_$1"; [ -n "$1" ] && [ -n "${!v}" ] || { echo "未知预设: '$1'（可用: SINGLE A B MULTI SPLIT）" >&2; return 1; }; echo "${!v}"; }
 
 refl() { local d; d=$(da "$1") || return 1; shift
   local c="$AXI -l ${RL:-23,24} -a $BDF,$d -- --mode reflector --vid $VID --b-pack 16 --hwts $*"
@@ -52,6 +59,14 @@ mdev() { local d; d=$(da "${D:-MULTI}") || return 1
 reflm() { local nic=$1; shift; local dev n; dev=$(mdev "$nic") || return 1; n=$(nctx "$nic" "$@")
   [ "$n" -le 16 ] || { echo "上下文 $n 个超过 16" >&2; return 1; }
   local c="$AXI --huge-unlink -l 23,24-$((23 + n)) $dev -- --mode reflector --vid $VID --flows ${F:-8} --burst 16 --b-pack 16 $*"
+  echo "+ $c"; $c; }
+
+# 反射端 --rx-split：一对 MAC（33:00.0），N 个上下文（--op rw 时 2N），每个 1 核，从 CPU 24 起
+refls() { local n=$1; shift; [ -n "$n" ] || { echo "用法: refls <N> [额外参数]" >&2; return 1; }
+  local k=$n d; case " $* " in *" --op rw "*) k=$((n * 2));; esac
+  [ "$k" -le 16 ] || { echo "上下文 $k 个超过 16" >&2; return 1; }
+  d=$(da "${D:-SPLIT}") || return 1
+  local c="$AXI --huge-unlink -l 23,24-$((23 + k)) -a $BDF,$d -- --mode reflector --vid $VID --rx-split $n --burst 16 --b-pack 16 $*"
   echo "+ $c"; $c; }
 
 sndm() { local nic=$1; shift; local dev n lc k mac; dev=$(mdev "$nic") || return 1; n=$(nctx "$nic" "$@")

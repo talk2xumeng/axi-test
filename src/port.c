@@ -1,6 +1,7 @@
 /*
  * 端口与流初始化
  */
+#define ALLOW_EXPERIMENTAL_API          /* 模板 / 异步 rte_flow（--rx-split） */
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -10,6 +11,12 @@
 #include <rte_cycles.h>
 #include <rte_dev.h>
 #include <rte_devargs.h>
+#include <rte_errno.h>
+
+#ifdef AXIPERF_NO_RANDOM_ITEM           /* 仅供在没有 RANDOM item 的 DPDK 上做编译检查，不能运行 */
+#define RTE_FLOW_ITEM_TYPE_RANDOM ((enum rte_flow_item_type)0x7fff)
+struct rte_flow_item_random { uint32_t value; };
+#endif
 
 #include "port.h"
 #include "hdr.h"
@@ -74,6 +81,136 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
 	return -1;
 }
 
+
+/* ---------------- --rx-split：同一对 MAC 按随机值均分到 N 个接收队列（mlx5 HW steering，模板 / 异步 API） ----------------
+ *
+ * 经 E100c 后反射端只看到一对 MAC、一个 VID，按地址导流只能进一个队列、一个核。
+ * mlx5 可以匹配网卡给每个包生成的随机值（RTE_FLOW_ITEM_TYPE_RANDOM，需 dv_flow_en=2），但每查一张表重新取一次值，
+ * 且每张表只能放一条带随机值的规则（nb_flows = 1）。所以用二叉树，每个节点一个 group、两张表：
+ *   优先级 0：random & 1 == 0 → 左子；优先级 1：全匹配 → 右子。每层独立 1/2，log2(N) 层后各队列 1/N，没有包落空。
+ * 节点按堆编号：根为 1，节点 n 的子节点 2n、2n+1，n ≥ N 为叶子 = 第 n − N 个上下文。
+ * group 0：DMAC == 网卡 MAC（rw 时再按 PCP 分写、读）→ 跳到该树的根。rw 时写树占 group 1 ~ N−1，读树占 N ~ 2N−2。
+ * 2026-10-12 rndq 在 03 上实测：4 个队列各 21.1 Mpps，合计 84.6 Mpps（线速 85.3），须开 MPRQ 与 CQE 压缩。
+ */
+static struct rte_flow_template_table *hws_table(uint16_t pi, uint32_t group, uint32_t prio,
+                                                 struct rte_flow_pattern_template *pt,
+                                                 struct rte_flow_actions_template *at, const char *what)
+{
+	struct rte_flow_error e = {0};
+	struct rte_flow_template_table_attr ta;
+	memset(&ta, 0, sizeof(ta));
+	ta.flow_attr.group = group;
+	ta.flow_attr.priority = prio;
+	ta.flow_attr.ingress = 1;
+	ta.nb_flows = 1;
+	struct rte_flow_template_table *t = rte_flow_template_table_create(pi, &ta, &pt, 1, &at, 1, &e);
+	if (!t) rte_exit(EXIT_FAILURE, "port %u --rx-split：建表 %s 失败：%s\n", pi, what, e.message ? e.message : "?");
+	return t;
+}
+
+static void hws_rule(uint16_t pi, struct rte_flow_template_table *t, const struct rte_flow_item *pat,
+                     const struct rte_flow_action *act, const char *what)
+{
+	struct rte_flow_error e = {0};
+	const struct rte_flow_op_attr oa = { .postpone = 0 };
+	if (!rte_flow_async_create(pi, 0, &oa, t, pat, 0, act, 0, NULL, &e))
+		rte_exit(EXIT_FAILURE, "port %u --rx-split：规则 %s 失败：%s\n", pi, what, e.message ? e.message : "?");
+	rte_flow_push(pi, 0, &e);
+	struct rte_flow_op_result r[4];
+	const uint64_t t0 = rte_get_tsc_cycles();
+	for (;;) {
+		int n = rte_flow_pull(pi, 0, r, 4, &e);
+		if (n < 0) rte_exit(EXIT_FAILURE, "port %u --rx-split：规则 %s 下发失败\n", pi, what);
+		if (n > 0) {
+			if (r[0].status != RTE_FLOW_OP_SUCCESS) rte_exit(EXIT_FAILURE, "port %u --rx-split：规则 %s 结果失败\n", pi, what);
+			return;
+		}
+		if (rte_get_tsc_cycles() - t0 > rte_get_tsc_hz()) rte_exit(EXIT_FAILURE, "port %u --rx-split：规则 %s 超时\n", pi, what);
+	}
+}
+
+static void split_configure(uint16_t pi)       /* 须在 rte_eth_dev_start 之前 */
+{
+	struct rte_flow_error e = {0};
+	const struct rte_flow_port_attr pa = { 0 };
+	const struct rte_flow_queue_attr qa = { .size = 64 };
+	const struct rte_flow_queue_attr *qav[1] = { &qa };
+	int r = rte_flow_configure(pi, &pa, 1, qav, &e);
+	if (r < 0) rte_exit(EXIT_FAILURE, "port %u --rx-split：rte_flow_configure 失败（%d %s），devargs 须加 dv_flow_en=2\n",
+	                    pi, r, e.message ? e.message : "");
+}
+
+static void split_rules(uint16_t pi, const struct rte_ether_addr *mac, int m, int N)
+{
+	struct rte_flow_error e = {0};
+	const struct rte_flow_pattern_template_attr pa = { .relaxed_matching = 1, .ingress = 1 };
+	const struct rte_flow_actions_template_attr aa = { .ingress = 1 };
+	char what[64];
+
+	/* 模板：group 0 匹配 DMAC（rw 再加 PCP）；树内 random 位 / 全匹配；动作 JUMP / QUEUE 的参数由每条规则给出 */
+	struct rte_flow_item_eth em, es, anym, anys;
+	struct rte_flow_item_vlan vm, vs;
+	memset(&em, 0, sizeof(em)); memset(&es, 0, sizeof(es)); memset(&anym, 0, sizeof(anym)); memset(&anys, 0, sizeof(anys));
+	memset(&vm, 0, sizeof(vm)); memset(&vs, 0, sizeof(vs));
+	memset(&em.hdr.dst_addr, 0xFF, RTE_ETHER_ADDR_LEN);
+	es.hdr.dst_addr = *mac;
+	vm.tci = rte_cpu_to_be_16(0xE000);
+	const struct rte_flow_item p0[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .mask = &em },
+		{ .type = m == 2 ? RTE_FLOW_ITEM_TYPE_VLAN : RTE_FLOW_ITEM_TYPE_END, .mask = &vm },
+		{ .type = RTE_FLOW_ITEM_TYPE_END } };
+	struct rte_flow_item_random rm = { .value = 1 }, rs = { .value = 0 };
+	const struct rte_flow_item prnd[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_RANDOM, .mask = &rm }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+	const struct rte_flow_item pany[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .mask = &anym }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+	struct rte_flow_pattern_template *pt0 = rte_flow_pattern_template_create(pi, &pa, p0, &e);
+	struct rte_flow_pattern_template *ptr = pt0 ? rte_flow_pattern_template_create(pi, &pa, prnd, &e) : NULL;
+	struct rte_flow_pattern_template *pta = ptr ? rte_flow_pattern_template_create(pi, &pa, pany, &e) : NULL;
+	if (!pta) rte_exit(EXIT_FAILURE, "port %u --rx-split：匹配模板失败：%s\n", pi, e.message ? e.message : "?");
+	const struct rte_flow_action aj[] = { { .type = RTE_FLOW_ACTION_TYPE_JUMP }, { .type = RTE_FLOW_ACTION_TYPE_END } };
+	const struct rte_flow_action aq[] = { { .type = RTE_FLOW_ACTION_TYPE_QUEUE }, { .type = RTE_FLOW_ACTION_TYPE_END } };
+	struct rte_flow_actions_template *atj = rte_flow_actions_template_create(pi, &aa, aj, aj, &e);
+	struct rte_flow_actions_template *atq = atj ? rte_flow_actions_template_create(pi, &aa, aq, aq, &e) : NULL;
+	if (!atq) rte_exit(EXIT_FAILURE, "port %u --rx-split：动作模板失败：%s\n", pi, e.message ? e.message : "?");
+
+	const struct rte_flow_item rrnd[] = { { .type = RTE_FLOW_ITEM_TYPE_RANDOM, .spec = &rs }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+	const struct rte_flow_item rany[] = { { .type = RTE_FLOW_ITEM_TYPE_ETH, .spec = &anys }, { .type = RTE_FLOW_ITEM_TYPE_END } };
+
+	for (int c = 0; c < m; c++) {                  /* c：上下文类型（rw 时 0 = 写，1 = 读） */
+		const uint32_t off = (uint32_t)(c * (N - 1));   /* 本树节点 n 在 group off + n */
+		/* group 0：DMAC（+ PCP）→ 本树根。每个 (group, 优先级) 一张表 */
+		struct rte_flow_template_table *t0 = hws_table(pi, 0, (uint32_t)c, pt0, atj, "group 0");
+		vs.tci = rte_cpu_to_be_16((uint16_t)((c ? VC_AR : VC_AW) << 13));
+		const struct rte_flow_item r0[] = {
+			{ .type = RTE_FLOW_ITEM_TYPE_ETH, .spec = &es },
+			{ .type = m == 2 ? RTE_FLOW_ITEM_TYPE_VLAN : RTE_FLOW_ITEM_TYPE_END, .spec = &vs },
+			{ .type = RTE_FLOW_ITEM_TYPE_END } };
+		struct rte_flow_action_jump j0 = { .group = off + 1 };
+		const struct rte_flow_action a0[] = { { .type = RTE_FLOW_ACTION_TYPE_JUMP, .conf = &j0 }, { .type = RTE_FLOW_ACTION_TYPE_END } };
+		hws_rule(pi, t0, r0, a0, "group 0");
+		/* 树：内部节点 1 .. N−1 */
+		for (int n = 1; n < N; n++) {
+			for (int side = 0; side < 2; side++) {
+				const int child = 2 * n + side;
+				const bool leaf = child >= N;
+				snprintf(what, sizeof(what), "group %u %s", off + (uint32_t)n, side ? "全匹配" : "random");
+				struct rte_flow_template_table *t = hws_table(pi, off + (uint32_t)n, (uint32_t)side,
+				                                              side ? pta : ptr, leaf ? atq : atj, what);
+				struct rte_flow_action_queue qa = { .index = (uint16_t)((child - N) * m + c) };   /* 与 port_init 的队列编排一致 */
+				struct rte_flow_action_jump ja = { .group = off + (uint32_t)child };
+				const struct rte_flow_action act[] = {
+					{ .type = leaf ? RTE_FLOW_ACTION_TYPE_QUEUE : RTE_FLOW_ACTION_TYPE_JUMP,
+					  .conf = leaf ? (const void *)&qa : (const void *)&ja },
+					{ .type = RTE_FLOW_ACTION_TYPE_END } };
+				hws_rule(pi, t, side ? rany : rrnd, act, what);
+			}
+		}
+	}
+	printf("port %u: --rx-split %d：网卡按随机值均分到 %d 个%s接收队列（%d 层二叉树）\n", pi, N, N,
+	       m == 2 ? "写、读各 " : "", __builtin_ctz((unsigned)N));
+}
+
 /*
  * mlx5 devargs 检查，按 --flows 区分：
  *   单流：关多包接收（不带 mprq_en=1）、关 CQE 压缩。单流收的是 542~566B 大包，多包接收要给每包挂外挂缓冲、
@@ -103,6 +240,9 @@ static void check_devargs(uint16_t pi)
 		why = "mprq_en=1（多流时发送端要高包率收小包）";
 	else if (!single && cqe_off)
 		why = "rxq_cqe_comp_en=1（多流须开 CQE 压缩，关闭时单卡包率约降到 45 Mpps）";
+	if (g_cfg.rx_split && !strstr(a, "dv_flow_en=2"))
+		rte_exit(EXIT_FAILURE, "port %u（%s）：--rx-split 需要 HW steering，devargs 须加 dv_flow_en=2，例如 -a <BDF>,dv_flow_en=2,%s\n",
+		         pi, rte_dev_name(di.device), DEV_MULTI);
 	if (why)
 		printf("\n*** 警告：port %u（%s）devargs 建议 %s，当前为 \"%s\"。\n"
 		       "*** %s建议 -a <BDF>,%s\n\n", pi, rte_dev_name(di.device), why, a,
@@ -156,6 +296,7 @@ void port_init(uint16_t pi)
 		if (!c->tmpl_pool) rte_exit(EXIT_FAILURE, "tmpl pool %u.%u\n", pi, q);
 		rte_mempool_obj_iter(c->tmpl_pool, tmpl_obj_init, &g_tmpl[fi]);
 	}
+	if (g_cfg.rx_split) split_configure(pi);
 	if (rte_eth_dev_start(pi) < 0) rte_exit(EXIT_FAILURE, "port %u start\n", pi);
 	{                                   /* 驱动实际选用的收发函数（向量化 / MPRQ / 标量等），影响时延 */
 		struct rte_eth_burst_mode bm;
@@ -178,7 +319,8 @@ void port_init(uint16_t pi)
 	 *   sender 收 B（VC2）→ 写队列，R（VC3）→ 读队列；reflector 收 AW（VC0）→ 写队列，AR（VC1）→ 读队列
 	 */
 	int bad = 0;
-	for (uint16_t q = 0; q < nq; q++) {
+	if (g_cfg.rx_split) split_rules(pi, &pmac, m, nf);
+	for (uint16_t q = 0; q < nq && !g_cfg.rx_split; q++) {
 		const struct flow_ctx *c = &g_flow[pi * nq + q];
 		const struct rte_ether_addr *a = &c->addr.src;
 		if (q % m == 0 && g_cfg.hdr == HDR_ETH && c->flow > 0 &&
@@ -240,7 +382,7 @@ void port_announce(void)
 void port_fini(void)
 {
 	for (uint16_t i = 0; i < g_nb_ports; i++) {
-		rte_flow_flush(i, NULL);
+		if (!g_cfg.rx_split) rte_flow_flush(i, NULL);   /* HW steering 的规则随端口关闭释放 */
 		rte_eth_dev_stop(i);
 		rte_eth_dev_close(i);
 	}

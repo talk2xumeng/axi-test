@@ -103,6 +103,9 @@ static void usage(void)
 	"                            默认 02:00:00:00:01:0PORT；测试时请显式设置\n"
 	"  --one-dmac               sender 各流请求都发往 --dmac 给出的同一个 MAC，不按流派生\n"
 	"                            （多源 MAC → 单一目的 MAC；反射端用 --flows 1）\n"
+	"  --rx-split N             reflector：同一对 MAC 的请求由网卡按随机值均分到 N 个接收队列，各一个核\n"
+	"                            （N = 2/4/8/16；经 E100c 后只有一对 MAC、一个 VID 时用）；不能与 --flows 同用\n"
+	"                            devargs 须加 dv_flow_en=2，并用多流 devargs（mprq_en=1、rxq_cqe_comp_en=1）\n"
 	"  --promisc                强制混杂接收 [默认仅接收本端各流 MAC]\n"
 	"\n"
 	"诊断与抓包（性能对比时建议关闭）\n"
@@ -141,7 +144,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -155,7 +158,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -181,6 +184,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_NOSPLIT: g_cfg.split = false; break;
 		case OPT_PROMISC: g_cfg.promisc = true; break;
 		case OPT_ONEDMAC: g_cfg.one_dmac = true; break;
+		case OPT_RXSPLIT: g_cfg.rx_split = (int)num(optarg); break;
 		case OPT_TIMEOUT: g_cfg.timeout_us = (uint32_t)num(optarg); break;
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
@@ -208,6 +212,16 @@ static void parse_args(int argc, char **argv)
 		case OPT_HELP: usage(); exit(0);
 		default: usage(); exit(1);
 		}
+	}
+	if (g_cfg.rx_split) {
+		const int n = g_cfg.rx_split;
+		if (g_cfg.sender || g_cfg.hdr != HDR_ETH || g_cfg.fpp != 1 || n < 2 || n > MAX_FPP || (n & (n - 1)) ||
+		    n * ctx_per_flow() > MAX_FLOWS) {
+			printf("--rx-split N 只用于 reflector、eth 头，不能与 --flows 同用；N 须为 2 的幂、2~%d（rw 时 N×2 ≤ %d）\n",
+			       MAX_FPP, MAX_FLOWS);
+			exit(1);
+		}
+		g_cfg.fpp = n;                               /* N 个上下文：各一个接收 / 发送队列、一个核，共用网卡 MAC */
 	}
 	if (g_cfg.fpp < 1 || g_cfg.fpp > MAX_FPP || g_cfg.window < 1 || g_cfg.window > 511 ||
 	    g_cfg.beats < 1 || g_cfg.beats > 4 || g_cfg.burst < 1 || g_cfg.burst > MAX_BURST || g_cfg.pack < 1 ||
@@ -288,6 +302,7 @@ int main(int argc, char **argv)
 	       g_cfg.sender ? "sender" : "reflector", g_cfg.rw ? "rw" : g_cfg.mix ? "mix" : g_cfg.read ? "read" : "write", hdr_name(g_cfg.hdr),
 	       g_cfg.window, g_cfg.pack, g_cfg.beats, g_cfg.burst, g_cfg.vid, g_cfg.sender && g_cfg.split,
 	       g_nb_ports, g_cfg.fpp, (int)ntx, g_cfg.sender ? (g_cfg.id_seq ? " id=seq" : " id=pool") : "");
+	if (g_cfg.rx_split) printf("rx-split=%d：同一 MAC 的请求按网卡随机值均分到 %d 个上下文\n", g_cfg.rx_split, g_cfg.rx_split);
 	if (g_cfg.hdr == HDR_SUE)
 		printf("sue: ethertype=0x%04x format=%u pkttype=%u gpu_id=0x%04x peer_gpu_id=0x%04x\n",
 		       g_cfg.sue_ethertype, g_cfg.sue_format, g_cfg.sue_pkttype, g_cfg.gpu_id,

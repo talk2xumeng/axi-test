@@ -68,6 +68,8 @@ struct config {
 	int    tx_cores;             /* sender：每条流的发送核数 1~4，每核独占一个发送队列和一段 ID（默认 1） */
 	bool   promisc;
 	bool   one_dmac;             /* sender：各流请求都发往 --dmac 给出的同一个地址，不按流派生 */
+	int    rx_split;             /* reflector：一对 MAC 的请求按网卡随机值分到 N 个接收队列 / 核（0 = 不分）；
+	                                解析后 fpp = N，N 个上下文共用网卡 MAC */
 	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
 	/* eth 头 */
