@@ -17,6 +17,8 @@
 #include "capture.h"
 #include "hwts.h"
 
+struct tsn_ctr g_tsn[MAX_PORTS][2];
+
 /*
  * 超时回收，在 RX 侧做（每 tmo/16 扫一遍全部 ID）。
  * outst[id] 只有两个写者且互斥：TX 把空闲 ID 置 1，RX 把在途 ID 清 0（收到响应或超时），
@@ -83,6 +85,8 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 	uint64_t t_s = rte_rdtsc();
 	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
 
+	const uint32_t uport = g_cfg.e100c_port[c->port];
+	uint32_t tsn = __atomic_fetch_add(&g_tsn[c->port][rd].v, (uint32_t)(n * pack), __ATOMIC_RELAXED);
 	uint64_t now = rte_rdtsc();
 	for (int i = 0; i < n; i++) {
 		uint8_t *p = rte_pktmbuf_mtod(tx[i], uint8_t *) + hl;
@@ -90,7 +94,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 			uint32_t id;
 			if (seq) { id = next_id; next_id = (id + 1) & (ID_SPACE - 1); }
 			else id = L->idq[tail++ & (ID_SPACE - 1)];
-			axi_req_set_id(p, rd, id, beats);
+			axi_req_set(p, rd, id, beats, uport, tsn++);
 			c->ts[id] = now;
 			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
 		}

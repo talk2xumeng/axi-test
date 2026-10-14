@@ -121,11 +121,26 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--vid` | 0 | 802.1Q VID（过交换机时填交换机上的 VLAN） |
 | `--promisc` | — | 强制混杂模式（默认 eth 头只收本端各流 MAC） |
 | `--dmac` | — | eth：`PORT,xx:xx:xx:xx:xx:xx`，对端网卡真实 MAC，可重复 |
+| `--e100c-port` | 0 | sender：`PORT,N`，DPDK 端口 PORT 所接 E100c 的 ETH 口号 N（1~4），写入每个请求的 user.port（awuser[51:49] / aruser[48:46]），可为各端口重复设置；未设填 0。实际连线须与口号一致 |
 | `--gpu-id` | — | sue：本端 GPU ID 基址（必填） |
 | `--peer-gpu-id` | — | sue：sender 的对端 GPU ID 基址（必填） |
 | `--sue-ethertype` | 0x88B5 | sue：EtherType（须 > 1500） |
 | `--sue-format` | 0 | sue：Format[2:0] |
 | `--sue-pkttype` | 0 | sue：PktType[4:0] |
+
+## user 域（E100c）
+
+sender 在每个请求事务的 awuser / aruser 里填 user.tsn 与 user.port，B / R 响应不带：
+
+| | AW | AR |
+|---|---|---|
+| tsn（16 bit） | awuser[48:33] = W0[4:0] + W1[31:21] | aruser[45:30] = W0[3:0] + W1[31:20] |
+| port（3 bit） | awuser[51:49] = W0[7:5] | aruser[48:46] = W0[6:4] |
+
+- tsn：每个请求事务一个，从 0 起递增，16 bit 循环。每个 DPDK 端口写、读各一个计数，同一端口的各流、各发送核共用（每批原子预留一段）。
+  单流单发送核时线上严格连续；多流或 `--tx-cores` > 1 时各队列交错，线上不保证单调。
+- port：`--e100c-port PORT,N`，N 为该端口所接 E100c 的 ETH 口号 1~4。
+- 其余 user 位、awaddr / araddr 仍填 0。Wireshark 插件显示为 `axiperf.user_tsn` / `axiperf.user_port`。
 
 ## 输出（每秒一行 / 每条流）
 

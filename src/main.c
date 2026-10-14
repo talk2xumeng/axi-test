@@ -107,6 +107,9 @@ static void usage(void)
 	"  --rx-split N             reflector：同一对 MAC 的请求由网卡按随机值均分到 N 个接收队列，各一个核\n"
 	"                            （N = 2/4/8/16；经 E100c 后只有一对 MAC、一个 VID 时用）；不能与 --flows 同用\n"
 	"                            devargs 须加 dv_flow_en=2，并用多流 devargs（mprq_en=1、rxq_cqe_comp_en=1）\n"
+	"  --e100c-port PORT,N      sender：DPDK 端口 PORT 接 E100c 的 ETH 口 N（1~4），写入请求的 user.port，可为各端口重复设置\n"
+	"                            （awuser[51:49] / aruser[48:46]；未设为 0）。user.tsn 总是填：每端口写、读各一个计数，\n"
+	"                            每个请求事务一个，从 0 递增、16 bit 循环（awuser[48:33] / aruser[45:30]）\n"
 	"  --promisc                强制混杂接收 [默认仅接收本端各流 MAC]\n"
 	"\n"
 	"诊断与抓包（性能对比时建议关闭）\n"
@@ -145,7 +148,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -159,7 +162,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -209,6 +212,12 @@ static void parse_args(int argc, char **argv)
 		case OPT_DMAC: {
 			int pi = atoi(optarg); char *mac = strchr(optarg, ',');
 			if (!mac || pi < 0 || pi >= MAX_PORTS || rte_ether_unformat_addr(mac + 1, &g_cfg.peer_mac[pi]) < 0) { usage(); exit(1); }
+			break; }
+		case OPT_E100C_PORT: {
+			int pi = atoi(optarg); char *v = strchr(optarg, ',');
+			long n = v ? strtol(v + 1, NULL, 0) : -1;
+			if (pi < 0 || pi >= MAX_PORTS || n < 1 || n > 4) { printf("--e100c-port 格式为 PORT,N，N 为 1~4\n"); exit(1); }
+			g_cfg.e100c_port[pi] = (uint8_t)n;
 			break; }
 		case 'h':
 		case OPT_HELP: usage(); exit(0);
@@ -306,6 +315,14 @@ int main(int argc, char **argv)
 	       g_cfg.window, g_cfg.pack, g_cfg.beats, g_cfg.burst, g_cfg.vid, g_cfg.sender && g_cfg.split,
 	       g_nb_ports, g_cfg.fpp, (int)ntx, g_cfg.sender ? (g_cfg.id_seq ? " id=seq" : " id=pool") : "");
 	if (g_cfg.rx_split) printf("rx-split=%d：同一 MAC 的请求按网卡随机值均分到 %d 个上下文\n", g_cfg.rx_split, g_cfg.rx_split);
+	if (g_cfg.sender) {
+		bool unset = false;
+		printf("user: tsn 每端口写 / 读各从 0 递增；port");
+		for (uint16_t i = 0; i < g_nb_ports; i++) { printf(" %u→%u", i, g_cfg.e100c_port[i]); unset |= !g_cfg.e100c_port[i]; }
+		printf("%s\n", unset ? "（0 = 未设 --e100c-port）" : "");
+	}
+	for (int i = g_nb_ports; i < MAX_PORTS; i++)
+		if (g_cfg.e100c_port[i]) printf("警告：--e100c-port 端口 %d 不存在（共 %u 个端口）\n", i, g_nb_ports);
 	if (g_cfg.hdr == HDR_SUE)
 		printf("sue: ethertype=0x%04x format=%u pkttype=%u gpu_id=0x%04x peer_gpu_id=0x%04x\n",
 		       g_cfg.sue_ethertype, g_cfg.sue_format, g_cfg.sue_pkttype, g_cfg.gpu_id,

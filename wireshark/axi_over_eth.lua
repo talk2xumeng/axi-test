@@ -45,6 +45,8 @@ local f = {
     awuser_hi = ProtoField.uint16("axiperf.awuser_56_44", "AWUSER [56:44]", base.HEX),
     awuser_mid = ProtoField.uint32("axiperf.awuser_43_12", "AWUSER [43:12]", base.HEX),
     awuser_lo = ProtoField.uint16("axiperf.awuser_11_0", "AWUSER [11:0]", base.HEX),
+    user_tsn = ProtoField.uint16("axiperf.user_tsn", "user.tsn (AW [48:33] / AR [45:30])", base.DEC),
+    user_port = ProtoField.uint8("axiperf.user_port", "user.port (AW [51:49] / AR [48:46])", base.DEC),
     awaddr = ProtoField.string("axiperf.awaddr", "AWADDR [48:0]"),
     awaddr_hi = ProtoField.uint32("axiperf.awaddr_48_29", "AWADDR [48:29]", base.HEX),
     awaddr_lo = ProtoField.uint32("axiperf.awaddr_28_0", "AWADDR [28:0]", base.HEX),
@@ -202,12 +204,22 @@ function axi.dissector(tvb, pinfo, tree)
             node:add(f.awuser_hi, user_hi)
             node:add(f.awuser_mid, w1)
             node:add(f.awuser_lo, user_lo)
+            -- user.tsn = awuser[48:33]: W0[4:0] + W1[31:21]; user.port = awuser[51:49]: W0[7:5]
+            node:add(f.user_tsn, band(r.w0, 0x1f) * 2048 + rshift(w1, 21))
+            node:add(f.user_port, band(rshift(r.w0, 5), 7))
             local addr_top17 = rshift(addr_hi, 3)
             local addr_bottom32 = band(addr_hi, 7) * 536870912 + addr_lo
             node:add(f.awaddr, string.format("0x%05X%08X",
                 addr_top17, addr_bottom32))
             node:add(f.awaddr_hi, addr_hi)
             node:add(f.awaddr_lo, addr_lo)
+        end
+        if r.ft == 3 then
+            -- W0: type[31:28], arid[27:19], aruser[60:42][18:0]; W1: aruser[41:10]
+            -- user.tsn = aruser[45:30]: W0[3:0] + W1[31:20]; user.port = aruser[48:46]: W0[6:4]
+            local w1 = u32(tvb, r.off + 4)
+            node:add(f.user_tsn, band(r.w0, 0xf) * 4096 + rshift(w1, 20))
+            node:add(f.user_port, band(rshift(r.w0, 4), 7))
         end
         if r.ft == 0 or r.ft == 1 or r.ft == 3 or r.ft == 4 then
             node:add(f.beats, r.beats)

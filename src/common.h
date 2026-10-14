@@ -72,7 +72,8 @@ struct config {
 	int    rx_split;             /* reflector：一对 MAC 的请求按网卡随机值分到 N 个接收队列 / 核（0 = 不分）；
 	                                解析后 fpp = N，N 个上下文共用网卡 MAC */
 	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
-	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */              /* 强制混杂模式（默认 eth 头只收本端各流 MAC） */
+	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */
+	uint8_t  e100c_port[MAX_PORTS];   /* sender：各 DPDK 端口所接的 E100c ETH 口号 1~4，填入 awuser / aruser 的 user.port（0 = 未设） */
 	/* eth 头 */
 	struct rte_ether_addr peer_mac[MAX_PORTS];   /* sender：各端口对端网卡真实 MAC */
 	/* sue 头（试验性，取值待与 IP 侧确认） */
@@ -154,6 +155,13 @@ struct flow_ctx {
 } __rte_cache_aligned;
 
 extern struct flow_ctx g_flow[MAX_FLOWS];
+
+/*
+ * user.tsn 计数（sender）：每个 DPDK 端口、写 / 读各一个，从 0 起每个请求事务加 1，低 16 bit 循环。
+ * 同一端口的各上下文、各发送核共用，每批（一次 tx_step）原子预留一段。
+ */
+struct tsn_ctr { uint32_t v; } __rte_cache_aligned;
+extern struct tsn_ctr g_tsn[MAX_PORTS][2];
 extern uint16_t g_nb_ports, g_nb_flows;   /* g_nb_flows = 上下文数（rw 时每条流 2 个） */
 
 /* 每条流（每个 MAC）的上下文数：rw 时写、读各一个，共用 MAC，各自队列与核 */

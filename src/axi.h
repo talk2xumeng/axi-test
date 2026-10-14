@@ -62,9 +62,48 @@ static inline uint16_t axi_req_build(uint8_t *p, bool read, int pack, int beats)
 	return (uint16_t)(p - s);
 }
 
-/* 发送时填 ID：只改每个事务的 W0 */
-static inline void axi_req_set_id(uint8_t *txn, bool read, uint32_t id, int beats)
-{ put_be32(txn, read ? axi_w0_ar(id) : axi_w0_aw(id, (uint32_t)beats)); }
+/*
+ * user 域（E100c 要求软件填）：
+ *   AW：awuser[51:49] = port，awuser[48:33] = tsn
+ *   AR：aruser[48:46] = port，aruser[45:30] = tsn
+ * 两者都是 {port[2:0], tsn[15:0]} 连续 19 bit，awuser 从 bit 33 起、aruser 从 bit 30 起。
+ * 线上位置：awuser[56:44] = W0[12:0]，awuser[43:12] = W1；aruser[60:42] = W0[18:0]，aruser[41:10] = W1。
+ * 所以 AW：port → W0[7:5]，tsn[15:11] → W0[4:0]，tsn[10:0] → W1[31:21]；
+ *      AR：port → W0[6:4]，tsn[15:12] → W0[3:0]，tsn[11:0] → W1[31:20]。
+ * B / R 响应不带 tsn / port。
+ */
+#define AW_USER_LSB 33
+#define AR_USER_LSB 30
+
+static inline uint64_t axi_user_tp(uint32_t port, uint32_t tsn)
+{ return ((uint64_t)(port & 7) << 16) | (tsn & 0xFFFF); }
+
+/* 发送时填 ID 与 user.tsn / user.port：改每个事务的 W0、W1（W1 其余位为 awuser / aruser 低位，模板为 0） */
+static inline void axi_req_set(uint8_t *txn, bool read, uint32_t id, int beats, uint32_t port, uint32_t tsn)
+{
+	uint32_t w0, w1;
+	if (!read) {
+		const uint64_t u = axi_user_tp(port, tsn) << AW_USER_LSB;   /* awuser[56:0] */
+		w0 = axi_w0_aw(id, (uint32_t)beats) | (uint32_t)(u >> 44);
+		w1 = (uint32_t)(u >> 12);
+	} else {
+		const uint64_t u = axi_user_tp(port, tsn) << AR_USER_LSB;   /* aruser[60:0] */
+		w0 = axi_w0_ar(id) | (uint32_t)(u >> 42);
+		w1 = (uint32_t)(u >> 10);
+	}
+	put_be32(txn, w0);
+	put_be32(txn + 4, w1);
+}
+
+/* 从请求事务头取 user.tsn / user.port（reflector 校验、测试用） */
+static inline void axi_req_user(const uint8_t *txn, bool read, uint32_t *port, uint32_t *tsn)
+{
+	const uint64_t w0 = get_be32(txn), w1 = get_be32(txn + 4);
+	const uint64_t v = read ? ((((w0 & 0x7FFFF) << 32) | w1) << 10) >> AR_USER_LSB
+	                        : ((((w0 & 0x1FFF) << 32) | w1) << 12) >> AW_USER_LSB;
+	*tsn = (uint32_t)(v & 0xFFFF);
+	*port = (uint32_t)((v >> 16) & 7);
+}
 
 /*
  * 解析响应 payload（sender 用）。ntxn=0 表示事务个数未知，按 plen 解析到末尾。

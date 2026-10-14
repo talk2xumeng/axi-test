@@ -31,12 +31,16 @@
 #   反射端: D=LAT refls 8                      （读写并发：D=LAT refls 4 --op rw）
 #   发送端: D=SINGLE sndm 1 --op write --one-dmac --window 64      （读：--op read --rpack 4；读写并发：--op rw --rpack 4）
 #   不限在途、压反射端吞吐时改回默认（反射端 SPLIT、发送端 MULTI）：关压缩时网卡约 46 Mpps 即丢包。
+#
+# 接 E100c：发送端每个请求都填 user.tsn（自动）与 user.port（E100c ETH 口号 1~4，按实际连线）：
+#   E100C="0,1" D=SINGLE sndm 1 --op write --one-dmac --window 64      （DPDK 端口 0 接 E100c 口 1）
 BDF=${BDF:-0000:33:00.0}
 PEER=${PEER:-0,a0:88:c2:76:cc:0c}
 BDF12=${BDF12:-0000:12:00.0}                 # 多流双卡用
 MAC12=${MAC12:-a0:88:c2:76:bb:6c}            # 反射端 12:00.0 的 MAC
 MAC33=${MAC33:-a0:88:c2:76:cc:0c}            # 反射端 33:00.0 的 MAC
 VID=${VID:-1}
+E100C=${E100C:-}                              # 发送端 user.port：空格分隔的 PORT,N，例 E100C="0,1" 或 E100C="0,1 1,2"
 AXI=${AXI:-./axiperf}
 
 # ---- devargs 预设（只在这里改）----
@@ -48,6 +52,8 @@ DA_MULTI="mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq
 DA_SPLIT="dv_flow_en=2,$DA_MULTI"
 DA_LAT="dv_flow_en=2,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                    # 反射端 --rx-split 低时延（≤ 约 40 Mpps）                                                                                    # 反射端 --rx-split
 
+ep() { local x; for x in $E100C; do printf -- '--e100c-port %s ' "$x"; done; }
+
 da() { local v="DA_$1"; [ -n "$1" ] && [ -n "${!v}" ] || { echo "未知预设: '$1'（可用: SINGLE A B MULTI SPLIT LAT）" >&2; return 1; }; echo "${!v}"; }
 
 refl() { local d; d=$(da "$1") || return 1; shift
@@ -55,7 +61,7 @@ refl() { local d; d=$(da "$1") || return 1; shift
   echo "+ $c"; $c; }
 
 snd() { local d; d=$(da "$1") || return 1; local w=$2; [ -n "$w" ] || { echo "用法: snd <预设> <窗口> [额外参数]" >&2; return 1; }; shift 2
-  local c="$AXI -l ${SL:-23,24,25} -a $BDF,$d -- --mode sender --vid $VID --window $w --time ${T:-20} --hwts --dmac $PEER $*"
+  local c="$AXI -l ${SL:-23,24,25} -a $BDF,$d -- --mode sender --vid $VID --window $w --time ${T:-20} --hwts --dmac $PEER $(ep)$*"
   echo "+ $c"; $c; }
 
 # ---- 多流 ----
@@ -83,5 +89,5 @@ sndm() { local nic=$1; shift; local dev n lc k mac; dev=$(mdev "$nic") || return
   [ "$n" -le 16 ] || { echo "上下文 $n 个超过 16" >&2; return 1; }
   lc=0@23; for k in $(seq 0 $((n - 1))); do lc+=",$((2*k+1))@$((24+k)),$((2*k+2))@$((104+k))"; done
   if [ "$nic" = 1 ]; then mac="--dmac 0,$MAC33"; else mac="--dmac 0,$MAC12 --dmac 1,$MAC33"; fi
-  local c="$AXI --huge-unlink --lcores $lc $dev -- --mode sender --vid $VID --flows ${F:-8} --burst 16 --window 511 --time ${T:-20} $mac $*"
+  local c="$AXI --huge-unlink --lcores $lc $dev -- --mode sender --vid $VID --flows ${F:-8} --burst 16 --window 511 --time ${T:-20} $mac $(ep)$*"
   echo "+ $c"; $c; }

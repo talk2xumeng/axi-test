@@ -144,7 +144,8 @@ DMAC(6) | SMAC(6) | TPID 0x8100(2) | PCP/DEI/VID(2) | Length(2) | AXI 事务 × 
 | awlen / arlen | 3（每事务 4 拍，256B） |
 | awsize / arsize | 3'b110（64B/拍） |
 | writeFull（writefull） | 4'b1111 |
-| awuser / awaddr / aruser / araddr | 不做要求（当前填 0） |
+| awuser / aruser | user.tsn、user.port 由 sender 填（见 README「user 域」），其余位 0 |
+| awaddr / araddr | 不做要求（当前填 0） |
 | bid / rid | 等于对应请求的 awid / arid |
 | rlen | 等于 arlen |
 | rlast | 1 |
