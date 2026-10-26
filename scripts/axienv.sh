@@ -32,6 +32,13 @@
 #   发送端: D=SINGLE sndm 1 --op write --one-dmac --window 64      （读：--op read --rpack 4；读写并发：--op rw --rpack 4）
 #   不限在途、压反射端吞吐时改回默认（反射端 SPLIT、发送端 MULTI）：关压缩时网卡约 46 Mpps 即丢包。
 #
+# E100c 等效读写并发，按 T 口径（E100c 的 511 个 ID 只在 E100c#1 → 反射端 → E100c#1 这段被占，不含发送端主机）：
+#   发送端每方向总在途 W = 512 × RTT ÷ T。发送端限 512 时 T 段只占约 250 个 ID，读写并发只有写 87、读 96 G（整卡收发
+#   各约 100G 时网卡发送一段时延 +1.4 µs）。10-26 直连扫描：每方向 640 → 写 102 / 读 112 G；800 → 119 / 130 G（T 段约 400，
+#   留 20% 余量）；1024 → 137 / 148 G（T 段约 530 ≈ 511）。两端单 TC（mlnx_qos --prio_tc=0,0,0,0,0,0,0,0），否则读写并发会饿死。
+#   反射端: D=LAT refls 2 --op rw
+#   发送端: F=4 D=SINGLE sndm 1 --op rw --rpack 4 --one-dmac --window 200      （4 流 × 200 = 每方向 800）
+#
 # 接 E100c：发送端每个请求都填 user.tsn（自动）与 user.port（E100c ETH 口号 1~4，按实际连线）：
 #   E100C="0,1" D=SINGLE sndm 1 --op write --one-dmac --window 64      （DPDK 端口 0 接 E100c 口 1）
 BDF=${BDF:-0000:33:00.0}

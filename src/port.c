@@ -4,6 +4,14 @@
 #define ALLOW_EXPERIMENTAL_API          /* 模板 / 异步 rte_flow（--rx-split） */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <linux/dcbnl.h>
 
 #include <rte_ethdev.h>
 #include <rte_flow.h>
@@ -259,9 +267,78 @@ static void check_devargs(uint16_t pi)
 		       single ? "单流" : "多流", single ? DEV_SINGLE : DEV_MULTI);
 }
 
+/*
+ * 网卡 TX 按 TC 严格优先级调度（mlnx_qos 默认 tsa vendor；PCP 1 默认在 tc0，最低）。同一端口既发写又发读时
+ * （发送端 AW / AR，反射端 B / R），只要高 TC 有帧排队，低 TC 就发不出去：10-26 直连读写并发 max RTT 103 ms，
+ * 超时计入 lost / err；全部优先级归一个 TC 后 max < 210 µs。
+ * 用 DCB netlink 读 IEEE ETS（与 mlnx_qos 同源）：PCP 0~3 分在不同 TC、且其中有非 ETS 的 TC 时告警。
+ */
+static int ieee_ets_get(const char *ifname, struct ieee_ets *ets)
+{
+	int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+	if (fd < 0) return -1;
+	struct { struct nlmsghdr nh; struct dcbmsg dm; char buf[64]; } req;
+	memset(&req, 0, sizeof(req));
+	req.nh.nlmsg_type = RTM_GETDCB;
+	req.nh.nlmsg_flags = NLM_F_REQUEST;
+	req.dm.dcb_family = AF_UNSPEC;
+	req.dm.cmd = DCB_CMD_IEEE_GET;
+	struct rtattr *a = (struct rtattr *)req.buf;
+	a->rta_type = DCB_ATTR_IFNAME;
+	a->rta_len = (unsigned short)RTA_LENGTH(strlen(ifname) + 1);
+	memcpy(RTA_DATA(a), ifname, strlen(ifname) + 1);
+	req.nh.nlmsg_len = NLMSG_LENGTH(sizeof(req.dm)) + RTA_ALIGN(a->rta_len);
+	static char rsp[16384];
+	int r = -1;
+	ssize_t n = send(fd, &req, req.nh.nlmsg_len, 0) < 0 ? -1 : recv(fd, rsp, sizeof(rsp), 0);
+	const struct nlmsghdr *nh = (const struct nlmsghdr *)rsp;
+	if (n > 0 && NLMSG_OK(nh, (unsigned)n) && nh->nlmsg_type == RTM_GETDCB) {
+		int len = (int)NLMSG_PAYLOAD(nh, sizeof(struct dcbmsg));
+		for (struct rtattr *t = (struct rtattr *)((char *)NLMSG_DATA(nh) + NLMSG_ALIGN(sizeof(struct dcbmsg)));
+		     RTA_OK(t, len); t = RTA_NEXT(t, len)) {
+			if (t->rta_type != DCB_ATTR_IEEE) continue;
+			int l2 = (int)RTA_PAYLOAD(t);
+			for (struct rtattr *u = RTA_DATA(t); RTA_OK(u, l2); u = RTA_NEXT(u, l2))
+				if (u->rta_type == DCB_ATTR_IEEE_ETS && RTA_PAYLOAD(u) >= sizeof(*ets)) { memcpy(ets, RTA_DATA(u), sizeof(*ets)); r = 0; }
+		}
+	}
+	close(fd);
+	return r;
+}
+
+static void check_tc(uint16_t pi)
+{
+	if (!g_cfg.rw && !g_cfg.mix) return;         /* 只写或只读时一个端口只发一个 PCP，不受影响 */
+	struct rte_eth_dev_info di;
+	if (rte_eth_dev_info_get(pi, &di) != 0 || !di.device || !di.driver_name || !strstr(di.driver_name, "mlx5")) return;
+	char path[128], ifname[IF_NAMESIZE] = "";
+	snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/net", rte_dev_name(di.device));
+	DIR *d = opendir(path);
+	if (d) {
+		for (struct dirent *e; (e = readdir(d)) != NULL; )
+			if (e->d_name[0] != '.' && strlen(e->d_name) < sizeof(ifname)) { memcpy(ifname, e->d_name, strlen(e->d_name) + 1); break; }
+		closedir(d);
+	}
+	struct ieee_ets ets;
+	if (!ifname[0] || ieee_ets_get(ifname, &ets) < 0) {
+		printf("提示：port %u 读不到网卡 TC 配置（%s），未检查 TC 严格优先级\n", pi, ifname[0] ? ifname : "无 netdev");
+		return;
+	}
+	bool multi = false, strict = false;
+	for (int p = VC_AW; p <= VC_R; p++) {
+		if (ets.prio_tc[p] != ets.prio_tc[VC_AW]) multi = true;
+		if (ets.tc_tsa[ets.prio_tc[p]] != IEEE_8021QAZ_TSA_ETS) strict = true;
+	}
+	if (multi && strict)
+		printf("\n*** 警告：port %u（%s）PCP 0~3 分在 tc %u/%u/%u/%u 且为严格优先级，读写并发时低 TC 的帧会被饿死几十 ms，"
+		       "超时计入 lost / err。\n*** 两端都改为单 TC：mlnx_qos -i %s --prio_tc=0,0,0,0,0,0,0,0\n\n",
+		       pi, ifname, ets.prio_tc[0], ets.prio_tc[1], ets.prio_tc[2], ets.prio_tc[3], ifname);
+}
+
 void port_init(uint16_t pi)
 {
 	check_devargs(pi);
+	check_tc(pi);
 	int socket = rte_eth_dev_socket_id(pi);
 	const int m = ctx_per_flow();
 	uint16_t nrxd = (uint16_t)g_cfg.rxd, ntxd = NB_TXD, nf = (uint16_t)g_cfg.fpp, nq = (uint16_t)(nf * m);   /* nf：流（MAC）数；nq：队列数 */
