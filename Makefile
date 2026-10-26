@@ -19,10 +19,14 @@ build:
 	mkdir -p build
 
 clean:
-	rm -rf build $(APP) rndq
+	rm -rf build $(APP) rndq pingpong
 
 .PHONY: clean
 
 # RANDOM 分队列探针（需带 RTE_FLOW_ITEM_TYPE_RANDOM 的 DPDK，如 DOCA 22.11）
 rndq: tools/rndq.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDLIBS)
+
+# 最小 DPDK 乒乓时延探针（单队列、无 rte_flow），同主机两端时分出去程 / 回程
+pingpong: tools/pingpong.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDLIBS)

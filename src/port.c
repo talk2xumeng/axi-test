@@ -222,9 +222,12 @@ static void split_rules(uint16_t pi, const struct rte_ether_addr *mac, int m, in
  *         做引用计数和回调释放，占反射端约 40% 的周期；关掉后单流写 63.0 → 66.3G。关 CQE 压缩满载 RTT 约低 3.5 µs。
  *   多流：开多包接收（发送端要以几十 Mpps 收 64B 写响应）、开 CQE 压缩。单卡 8 流写关压缩时只有 45 Mpps
  *         （开时 78.6），16 流仍约 46 Mpps，开销随网卡总包率上升，加核无效。
+ *   发送内联：每端口发送队列少于 txqs_min_inline（默认 8）时 mlx5 整个关掉内联，txq_inline_mpw 不生效，
+ *         须加 txqs_min_inline=1。只内联 ≤ 128B 的小包：10-26 直连实测空载 RTT 6.6 → 5.85 µs，单流读 18.2 → 19.5 Mpps；
+ *         大包也内联（txq_inline_max ≥ 566）空载 5.15 µs，但网卡每发送队列只有约 2.1 Mpps，满载不可用。
  */
-#define DEV_SINGLE "txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"
-#define DEV_MULTI  "mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"
+#define DEV_SINGLE "txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"
+#define DEV_MULTI  "mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"
 static void check_devargs(uint16_t pi)
 {
 	struct rte_eth_dev_info di;
@@ -237,6 +240,8 @@ static void check_devargs(uint16_t pi)
 	printf("port %u（%s）devargs: \"%s\"\n", pi, rte_dev_name(di.device), a);
 	if (!strstr(a, "txq_inline_mpw="))
 		why = "txq_inline_mpw=128（发送内联，未带时包率约低 20%）";
+	else if (g_cfg.fpp * ctx_per_flow() * tx_lanes() < 8 && !strstr(a, "txqs_min_inline="))
+		why = "txqs_min_inline=1（发送队列少于 8 个时 mlx5 不做内联，txq_inline_mpw 不生效；加上后空载 RTT 约低 0.75 µs）";
 	else if (single && mprq)
 		why = "去掉 mprq_en=1（单流收大包，多包接收的外挂缓冲开销大，关掉后带宽约高 5%）";
 	else if (single && !cqe_off)

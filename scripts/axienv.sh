@@ -44,13 +44,13 @@ E100C=${E100C:-}                              # 发送端 user.port：空格分�
 AXI=${AXI:-./axiperf}
 
 # ---- devargs 预设（只在这里改）----
-DA_SINGLE="txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                                  # 单流基线，无 MPRQ
+DA_SINGLE="txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                                  # 单流基线，无 MPRQ
 DA_A="txq_inline_mpw=1024,txq_inline_max=1024,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                  # 实验 A：全内联
 DA_B="txq_inline_mpw=128,txq_mpw_en=0,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                          # 实验 B：关 eMPW
-DA_MULTI="mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"   # 多流
+DA_MULTI="mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1"   # 多流
 
 DA_SPLIT="dv_flow_en=2,$DA_MULTI"
-DA_LAT="dv_flow_en=2,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                    # 反射端 --rx-split 低时延（≤ 约 40 Mpps）                                                                                    # 反射端 --rx-split
+DA_LAT="dv_flow_en=2,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0"                                    # 反射端 --rx-split 低时延（≤ 约 40 Mpps）                                                                                    # 反射端 --rx-split
 
 ep() { local x; for x in $E100C; do printf -- '--e100c-port %s ' "$x"; done; }
 
