@@ -92,6 +92,7 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
  * group 0：DMAC == 网卡 MAC（rw 时再按 PCP 分写、读）→ 跳到该树的根。rw 时写树占 group 1 ~ N−1，读树占 N ~ 2N−2。
  * 2026-10-12 rndq 在 03 上实测：4 个队列各 21.1 Mpps，合计 84.6 Mpps（线速 85.3），须开 MPRQ 与 CQE 压缩。
  */
+#ifdef HAVE_FLOW_RANDOM
 static struct rte_flow_template_table *hws_table(uint16_t pi, uint32_t group, uint32_t prio,
                                                  struct rte_flow_pattern_template *pt,
                                                  struct rte_flow_actions_template *at, const char *what)
@@ -210,6 +211,10 @@ static void split_rules(uint16_t pi, const struct rte_ether_addr *mac, int m, in
 	printf("port %u: --rx-split %d：网卡按随机值均分到 %d 个%s接收队列（%d 层二叉树）\n", pi, N, N,
 	       m == 2 ? "写、读各 " : "", __builtin_ctz((unsigned)N));
 }
+#else                                           /* main 已拒绝 --rx-split，不会走到这里 */
+static void split_configure(uint16_t pi) { (void)pi; }
+static void split_rules(uint16_t pi, const struct rte_ether_addr *mac, int m, int N) { (void)pi; (void)mac; (void)m; (void)N; }
+#endif
 
 /*
  * mlx5 devargs 检查，按 --flows 区分：

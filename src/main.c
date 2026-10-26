@@ -233,6 +233,10 @@ static void parse_args(int argc, char **argv)
 			       MAX_FPP, MAX_FLOWS);
 			exit(1);
 		}
+#ifndef HAVE_FLOW_RANDOM
+		printf("--rx-split 需要 RTE_FLOW_ITEM_TYPE_RANDOM，本 DPDK 没有（需 DOCA 22.11 或上游 24.03 起）\n");
+		exit(1);
+#endif
 		g_cfg.fpp = n;                               /* N 个上下文：各一个接收 / 发送队列、一个核，共用网卡 MAC */
 	}
 	if (g_cfg.fpp < 1 || g_cfg.fpp > MAX_FPP || g_cfg.window < 1 || g_cfg.window > 511 ||
