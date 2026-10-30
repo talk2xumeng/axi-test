@@ -103,6 +103,7 @@ static void usage(void)
 	"                            默认 02:00:00:00:01:0PORT；测试时请显式设置\n"
 	"  --one-dmac               sender 各流请求都发往 --dmac 给出的同一个 MAC，不按流派生\n"
 	"                            （多源 MAC → 单一目的 MAC；反射端用 --flows 1）\n"
+	"  --brief                  精简输出：每秒只打所有流合并的结果（二层速率、AXI、RTT、err / lost），不打每流明细和调试列\n"
 	"  --rxd N                  每个接收队列的描述符数，2 的幂、64~32768 [1024]；--rx-split 高包率时建议 4096\n"
 	"  --rx-split N             reflector：同一对 MAC 的请求由网卡按随机值均分到 N 个接收队列，各一个核\n"
 	"                            （N = 2/4/8/16；经 E100c 后只有一对 MAC、一个 VID 时用）；不能与 --flows 同用\n"
@@ -139,7 +140,7 @@ static bool help_requested(int argc, char **argv)
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) return true;
 		/* 以下为不取值的应用选项；其他长选项的下一项是它的值。 */
 		if (!strcmp(argv[i], "--nosplit") || !strcmp(argv[i], "--id-seq") ||
-		    !strcmp(argv[i], "--hwts") || !strcmp(argv[i], "--promisc") || !strcmp(argv[i], "--one-dmac")) continue;
+		    !strcmp(argv[i], "--hwts") || !strcmp(argv[i], "--promisc") || !strcmp(argv[i], "--one-dmac") || !strcmp(argv[i], "--brief")) continue;
 		if (!strncmp(argv[i], "--", 2) && !strchr(argv[i], '=') && i + 1 < argc) i++;
 	}
 	return false;
@@ -148,7 +149,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -162,7 +163,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"brief", 0, 0, OPT_BRIEF}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -190,6 +191,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_ONEDMAC: g_cfg.one_dmac = true; break;
 		case OPT_RXSPLIT: g_cfg.rx_split = (int)num(optarg); break;
 		case OPT_RXD:     g_cfg.rxd = (int)num(optarg); break;
+		case OPT_BRIEF:   g_cfg.brief = true; break;
 		case OPT_TIMEOUT: g_cfg.timeout_us = (uint32_t)num(optarg); break;
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
@@ -357,18 +359,19 @@ int main(int argc, char **argv)
 				const unsigned k = wi % per;
 				if (k == ntx) {
 					rte_eal_remote_launch(sender_rx_loop, c, pick);
-					printf("flow %u.%u RX -> lcore %u\n", c->port, c->flow, pick);
+					if (!g_cfg.brief) printf("flow %u.%u RX -> lcore %u\n", c->port, c->flow, pick);
 				} else {
 					struct tx_arg *a = &ta[wi / per][k];
 					a->c = c; a->k = (uint16_t)k;
 					rte_eal_remote_launch(sender_tx_loop, a, pick);
-					if (ntx > 1) printf("flow %u.%u TX%u (txq %u, ID %d-%d) -> lcore %u\n", c->port, c->flow, k, c->lane[k].txq,
+					if (g_cfg.brief) { /* 不打绑核行 */ }
+					else if (ntx > 1) printf("flow %u.%u TX%u (txq %u, ID %d-%d) -> lcore %u\n", c->port, c->flow, k, c->lane[k].txq,
 					                    (int)k * g_cfg.window / (int)ntx, ((int)k + 1) * g_cfg.window / (int)ntx - 1, pick);
 					else printf("flow %u.%u TX -> lcore %u\n", c->port, c->flow, pick);
 				}
 			} else {
 				rte_eal_remote_launch(worker_main, c, pick);
-				printf("flow %u.%u -> lcore %u\n", c->port, c->flow, pick);
+				if (!g_cfg.brief) printf("flow %u.%u -> lcore %u\n", c->port, c->flow, pick);
 			}
 		}
 	}

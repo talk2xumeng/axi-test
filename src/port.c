@@ -430,6 +430,7 @@ void port_init(uint16_t pi)
 		char a[32], b[32];
 		hdr_addr_str(&c->addr.src, a, sizeof(a));
 		hdr_addr_str(&c->addr.dst, b, sizeof(b));
+		if (g_cfg.brief) continue;              /* 不打每流地址，MAC 用完整输出查看 */
 		if (g_cfg.sender)
 			printf("flow %u.%u: rxq %u txq %u-%u  %s  my %s  peer %s\n", pi, c->flow, q, c->txq0, c->txq0 + c->ntx - 1,
 			       c->read ? "read " : "write", a, b);
