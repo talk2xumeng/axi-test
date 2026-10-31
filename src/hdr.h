@@ -84,6 +84,17 @@ static inline void oisa_reply(uint8_t *f, const uint8_t *req, uint8_t vc, uint16
 	put_be16(f + 10, (uint16_t)((ntxn << 10) | dest));
 }
 
+/*
+ * OISA 请求头：在 hdr_build 写好的地址上填 VC、packet_type、length、packing_num。
+ * 读请求 VC=1、PktType=4；写请求的前两字节沿用 E100c 样例 c0 c0（邮件的 PktType=2 待确认）。
+ */
+static inline void oisa_request(uint8_t *f, bool read, uint16_t ntxn, uint16_t len)
+{
+	if (read) { f[0] = (uint8_t)((6u << 5) | (1u << 2)); f[1] = 4; }
+	put_be16(f + 2, len);
+	put_be16(f + 10, (uint16_t)((ntxn << 10) | (get_be16(f + 10) & 0x3FF)));
+}
+
 /* 原地把请求帧头改为响应帧头：交换源 / 目的地址，改 VC、事务个数、长度 */
 static inline void hdr_reply(uint8_t *f, uint8_t vc, uint16_t ntxn, uint16_t plen)
 {

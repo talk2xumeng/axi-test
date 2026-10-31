@@ -123,7 +123,7 @@ void stats_print(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_TXC], d
 	if (g_cfg.brief) { print_brief(prev, prev_tx, dt, final); return; }
 	static int line;
 	if (final || line++ % 20 == 0)
-		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts   err  lost   ign  xmac  pcpx imissed nombuf%s  swd50us swd99us\n",
+		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts       txns   err  lost   ign  xmac  pcpx imissed nombuf%s  swd50us swd99us\n",
 		       final ? "---- total/avg ----\n" : "", g_cfg.hwts ? "  rxd50us rxd99us rxdneg" : "");
 	for (uint16_t i = 0; i < g_nb_flows; i++) {
 		struct flow_ctx *c = &g_flow[i];
@@ -149,7 +149,7 @@ void stats_print(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_TXC], d
 		char lab[24];
 		snprintf(lab, sizeof(lab), "%u.%u%s", c->port, c->flow,
 		         ((g_cfg.sender && g_cfg.mix) || g_cfg.rw) ? (c->read ? "r" : "w") : "");
-		printf("%-4s %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %5lu %5lu %5lu %5lu %5lu %7lu %6lu",
+		printf("%-4s %6.2f %7.1f %6.2f %7.1f %6.2f %5.1f %7.2f %6.2f %6.2f %6.1f %7.1f %8lu %6.1f %6.1f %6.0f %4.1f %10lu %10lu %10lu %5lu %5lu %5lu %5lu %5lu %7lu %6lu",
 		       lab,
 		       (txp - otxp) / dt / 1e6, (txw - otxw) * 8 / dt / 1e9,
 		       (st->rx_pkts - o->rx_pkts) / dt / 1e6, (st->rx_wire_bytes - o->rx_wire_bytes) * 8 / dt / 1e9,
@@ -160,7 +160,7 @@ void stats_print(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_TXC], d
 		       bTpct, bR * 100.0 / (dt * g_hz),
 		       pk ? (double)(bT + bR) / pk : 0,
 		       (st->rx_hits - o->rx_hits) ? (double)(st->rx_pkts - o->rx_pkts) / (st->rx_hits - o->rx_hits) : 0,
-		       (unsigned long)txp, (unsigned long)st->rx_pkts, (unsigned long)st->err, (unsigned long)(st->lost + tlost), (unsigned long)st->ign, (unsigned long)st->xmac,
+		       (unsigned long)txp, (unsigned long)st->rx_pkts, (unsigned long)tot, (unsigned long)st->err, (unsigned long)(st->lost + tlost), (unsigned long)st->ign, (unsigned long)st->xmac,
 		       (unsigned long)st->pcpx, (unsigned long)es.imissed, (unsigned long)es.rx_nombuf);
 		if (g_cfg.hwts)
 			printf("  %7.2f %7.2f %6lu", st->rxd_n ? rxd_pct(st, 0.5) : 0, st->rxd_n ? rxd_pct(st, 0.99) : 0, (unsigned long)st->rxd_neg);

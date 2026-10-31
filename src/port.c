@@ -56,6 +56,7 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 		hdr_build(t->buf, &c->addr.dst, &c->addr.src, c->read ? VC_AR : VC_AW, (uint16_t)req_pack(c->read), plen);
 		t->len = (uint16_t)(hl + plen);
 		if (t->len < g_cfg.min_frame) t->len = g_cfg.min_frame;   /* buf 已清 0，多出的就是补齐字节 */
+		if (g_cfg.ethertype) oisa_request(t->buf, c->read, (uint16_t)req_pack(c->read), t->len);
 		c->req_len = t->len;
 	} else {
 		memset(t->buf + hl, 0x5A, MAX_BEATS * (R_HDR + BEAT));

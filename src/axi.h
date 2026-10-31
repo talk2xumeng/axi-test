@@ -27,7 +27,7 @@ static inline uint32_t axi_w0_ar(uint32_t id)
 static inline uint32_t axi_w0_b(uint32_t id)                    /* BRESP=00 */
 { return ((uint32_t)FT_B << 28) | (id << 19) | ((uint32_t)g_cfg.b_port << 5); }   /* --b-port：与 AW 的 port 同在 W0[7:5] */
 static inline uint32_t axi_w0_r(uint32_t id, uint32_t beats)    /* rlast=1，RRESP=00 */
-{ return ((uint32_t)FT_R << 28) | (id << 19) | ((beats - 1) << 17) | (1u << 3); }
+{ return ((uint32_t)FT_R << 28) | (id << 19) | ((beats - 1) << 17) | (g_cfg.ethertype ? 0 : 1u << 3); }   /* OISA 的 bit 3 是 rsv */
 
 static inline uint32_t axi_id(uint32_t w0) { return (w0 >> 19) & 0x1FF; }
 static inline uint32_t axi_ft(uint32_t w0) { return w0 >> 28; }

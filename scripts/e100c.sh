@@ -14,6 +14,7 @@
 #   PAIR=e100c_r      ens101np0 发送 → E100c → ens106np0 反射（e100c 的反方向，user.port 默认 0，b-port 默认 2）
 #   PAIR=e100c2       ens111np0 发送 → E100c → ens119np0 反射（可与 e100c 同时跑，各开自己的窗口）
 #   PAIR=direct       ens102np0 发送 → 直连 → ens110np0 反射
+#   TXC=2 发送端每上下文 2 个发送核；SEP_RX=1 接收核不与发送核共用物理核
 #   COUNT=10 ping 只发 10 帧（1~511）；T=20 运行秒数；BRIEF=0 完整输出（看每流 MAC、ign、xmac、pcpx）
 #   HDR=sue 发送端改用 SUEv1-标准ETH 头（事务头在第 20 字节；反射端只有单流，本端 GPU ID 取 SUE_DST）
 #     SUE_DST=0xc0c0 目的 GPU ID；SUE_SRC=1 源 GPU ID；SUE_ET=0x88ee EtherType；SUE_FMT=0 Format；SUE_PT=0 PktType
@@ -61,8 +62,8 @@ else FLOWS=${FLOWS:-1}; NOLEN_ARG="--ethertype 0x88ee --min-frame ${MIN_FRAME:-0
 TMO_ARG=; [ "$PAIR" = direct ] || TMO_ARG="--timeout-us 0"
 # 反射端回的写响应 B 的 port id（ETHI1 的 port 0 经 UHUBT1 到 die1 ETHT3）
 BPORT_ARG=; [ "$PAIR" = direct ] || BPORT_ARG="--b-port ${B_PORT:-0} --b-tag ${B_TAG:-0} --b-pack 1"   # OISA 头只有一个 tag_id：每帧 1 个 B
-SND_DA=txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
-REFL_DA=dv_flow_en=2,$SND_DA
+SND_DA=${SND_DA:-txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0}
+REFL_DA=dv_flow_en=2,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
 AXI=$(cd "$(dirname "$0")/.." && pwd)/axiperf
 BRIEF_ARG=--brief; [ "${BRIEF:-1}" = 0 ] && BRIEF_ARG=
 
@@ -83,7 +84,14 @@ sender() {
 	need snd
 	[ "$op" = rw ] && n=$((FLOWS * 2))
 	lc=0@$SND_MAIN
-	for k in $(seq 0 $((n - 1))); do lc+=",$((2*k+1))@$((SND_TX+k)),$((2*k+2))@$((SND_RX+k))"; done
+	# TXC=每个上下文的发送核数；SEP_RX=1 时接收线程不用发送核的超线程，放在下一个物理核
+	local id=1 cur=$SND_TX txc=${TXC:-1} j
+	for k in $(seq 0 $((n - 1))); do
+		for j in $(seq 1 "$txc"); do lc+=",$id@$cur"; id=$((id + 1)); cur=$((cur + 1)); done
+		if [ "${SEP_RX:-0}" = 1 ]; then lc+=",$id@$cur"; cur=$((cur + 1)); else lc+=",$id@$((SND_RX + k))"; fi
+		id=$((id + 1))
+	done
+	[ "$txc" -gt 1 ] && set -- --tx-cores "$txc" "$@"
 	if [ "$PAIR" != direct ]; then dst="--dmac 0,$E100C_MAC --e100c-port 0,$E100C_PORT"
 	else dst="--dmac 0,$(cat /sys/class/net/$REFL_IF/address)"; fi
 	[ "$E100C_PORT" = 0 ] && dst="${dst/ --e100c-port 0,0/}"   # 不传该参数时 user.port 就是 0
