@@ -27,7 +27,7 @@ static inline uint32_t axi_w0_ar(uint32_t id)
 static inline uint32_t axi_w0_b(uint32_t id)                    /* BRESP=00 */
 { return ((uint32_t)FT_B << 28) | (id << 19) | ((uint32_t)g_cfg.b_port << 5); }   /* --b-port：与 AW 的 port 同在 W0[7:5] */
 static inline uint32_t axi_w0_r(uint32_t id, uint32_t beats)    /* rlast=1，RRESP=00 */
-{ return ((uint32_t)FT_R << 28) | (id << 19) | ((beats - 1) << 17) | (g_cfg.ethertype ? 0 : 1u << 3); }   /* OISA 的 bit 3 是 rsv */
+{ return ((uint32_t)FT_R << 28) | (id << 19) | ((beats - 1) << 17) | (g_cfg.ethertype ? g_cfg.r_user : 1u << 3); }   /* OISA 的 bit 3 是 rsv；--r-user 调试 ruser（样例 0x80） */
 
 static inline uint32_t axi_id(uint32_t w0) { return (w0 >> 19) & 0x1FF; }
 static inline uint32_t axi_ft(uint32_t w0) { return w0 >> 28; }
@@ -169,7 +169,7 @@ static inline int axi_ar_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, u
 		if (g_cfg.no_len && w0 == 0) break;                  /* 没有 Length 时，全 0 是短帧的补齐字节 */
 		if (axi_ft(w0) != FT_AR) { *bad = true; break; }
 		ids[k] = axi_id(w0);
-		beats[k] = ((w3 >> 3) & 3) + 1;                      /* arlen */
+		beats[k] = ((w3 >> (g_cfg.ethertype ? 10 : 3)) & 3) + 1;   /* arlen；E100c 转发时放在 W3[11:10] */
 		k++; off += AR_HDR;
 	}
 	if (ntxn && k != ntxn) *bad = true;

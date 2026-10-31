@@ -12,6 +12,9 @@
 # 环境变量：
 #   PAIR=e100c（默认）ens106np0 发送 → E100c → ens101np0 反射
 #   PAIR=e100c_r      ens101np0 发送 → E100c → ens106np0 反射（e100c 的反方向，user.port 默认 0，b-port 默认 2）
+#   PAIR=e100c_b      ens108np0 发送 → E100c → ens103np0 反射（user.port 0）
+#   PAIR=e100c_c      ens105np0 发送 → E100c → ens110np0 反射（user.port 3）
+#   PAIR=e100c_d      ens119np0 发送 → E100c → ens111np0 反射（user.port 1）
 #   PAIR=e100c2       ens111np0 发送 → E100c → ens119np0 反射（可与 e100c 同时跑，各开自己的窗口）
 #   PAIR=direct       ens102np0 发送 → 直连 → ens110np0 反射
 #   TXC=2 发送端每上下文 2 个发送核；SEP_RX=1 接收核不与发送核共用物理核
@@ -40,6 +43,21 @@ e100c_r)  # e100c 的反方向：两口都在 NUMA0
 	REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=8  REFL_C0=9
 	E100C_MAC=$E100C_MAC1 E100C_PORT=${E100C_PORT_R:-0} B_PORT=${B_PORT:-2}
 	;;
+e100c_b)  # die1 chip0 → die0 chip2
+	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
+	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=48 REFL_C0=49
+	E100C_MAC=$E100C_MAC1 E100C_PORT=${E100C_PORT_B:-0}
+	;;
+e100c_c)  # die1 chip3 → die0 chip1；发送端 NUMA0，反射端 NUMA1
+	SND_IF=ens105np0  SND_BDF=0000:70:00.0  SND_MAIN=56  SND_TX=57  SND_RX=185
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=80 REFL_C0=81
+	E100C_MAC=$E100C_MAC1 E100C_PORT=${E100C_PORT_C:-3}
+	;;
+e100c_d)  # die1 chip1 → die0 chip3；两口都在 NUMA1
+	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=72  SND_TX=73  SND_RX=201
+	REFL_IF=ens111np0 REFL_BDF=0000:dd:00.0 REFL_MAIN=88 REFL_C0=89
+	E100C_MAC=$E100C_MAC1 E100C_PORT=${E100C_PORT_D:-1}
+	;;
 e100c2)  # 两口都在 NUMA1
 	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=88  SND_TX=89  SND_RX=217
 	REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=72 REFL_C0=73
@@ -49,7 +67,7 @@ direct)  # 发送端 NUMA0，反射端 NUMA1
 	SND_IF=ens102np0  SND_BDF=0000:61:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
 	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=80 REFL_C0=81
 	;;
-*) echo "PAIR 只能是 e100c、e100c_r、e100c2 或 direct" >&2; exit 1 ;;
+*) echo "PAIR 只能是 e100c、e100c_b、e100c_c、e100c_d、e100c_r、e100c2 或 direct" >&2; exit 1 ;;
 esac
 
 # E100c 格式：EtherType 0x88ee + 0000，事务头从第 16 字节开始；响应不能按 DMAC 导流，只用 1 条流
@@ -61,7 +79,7 @@ else FLOWS=${FLOWS:-1}; NOLEN_ARG="--ethertype 0x88ee --min-frame ${MIN_FRAME:-0
 # E100c 的 ID 只在收到响应后释放：不做超时回收重发，否则响应一停，发出的请求会超过 511 把 ID 耗尽
 TMO_ARG=; [ "$PAIR" = direct ] || TMO_ARG="--timeout-us 0"
 # 反射端回的写响应 B 的 port id（ETHI1 的 port 0 经 UHUBT1 到 die1 ETHT3）
-BPORT_ARG=; [ "$PAIR" = direct ] || BPORT_ARG="--b-port ${B_PORT:-0} --b-tag ${B_TAG:-0} --b-pack 1"   # OISA 头只有一个 tag_id：每帧 1 个 B
+BPORT_ARG=; [ "$PAIR" = direct ] || BPORT_ARG="--b-port ${B_PORT:-0} --b-tag ${B_TAG:-0} --r-user ${R_USER:-0x80} --b-pack 1"   # OISA 头只有一个 tag_id：每帧 1 个 B
 SND_DA=${SND_DA:-txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0}
 REFL_DA=dv_flow_en=2,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
 AXI=$(cd "$(dirname "$0")/.." && pwd)/axiperf
@@ -132,6 +150,11 @@ refl)
 		[ "$1" != rw ] || { echo "HDR=sue 的反射端只有单流，不支持 rw" >&2; exit 1; }
 		run sudo "$AXI" --file-prefix "axirefl_$PAIR" --huge-unlink -l "$REFL_MAIN,$REFL_C0" -a "$REFL_BDF,$SND_DA" -- \
 			--mode reflector --vid "$VID" --flows 1 --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG --gpu-id "${SUE_DST:-0xc0c0}" "$@"
+		exit
+	fi
+	if [ "${REFL_CORES:-4}" = 1 ]; then   # 单队列单核：响应严格按收到的顺序发出
+		run sudo "$AXI" --file-prefix "axirefl_$PAIR" --huge-unlink -l "$REFL_MAIN,$REFL_C0" -a "$REFL_BDF,$SND_DA" -- \
+			--mode reflector --vid "$VID" --flows 1 --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG $BPORT_ARG $BRIEF_ARG "$@"
 		exit
 	fi
 	split=4; rw=

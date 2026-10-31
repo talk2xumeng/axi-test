@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include <rte_ether.h>
+#include <rte_ring.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 #include <rte_byteorder.h>
@@ -60,7 +61,10 @@ struct config {
 	uint64_t count;              /* sender：每个发送上下文最多发的请求包数（0 = 不限） */
 	uint8_t  b_port;             /* reflector：写响应 B 的 port id（W0[7:5]），默认 0 */
 	uint16_t b_tag;              /* reflector：--ethertype 时写响应 EtherType 后的 16 位，默认 0 */
-	uint16_t min_frame;          /* 请求、响应都补 0 到该长度（不含 FCS），0 = 不补 */
+	uint32_t r_user;             /* 调试：--ethertype 时读响应 W0 的低位（ruser） */
+	int      req_b1;            /* 调试：请求 OISA 头第 1 字节（format + packet_type），-1 = 默认 */
+	bool     req_tag;            /* 调试：请求的 tag_id 填首个事务的 ID，默认 0 */
+	uint16_t min_frame;         /* 请求、响应都补 0 到该长度（不含 FCS），0 = 不补 */
 	enum hdr_kind hdr;
 	int    vid;                  /* 802.1Q VID（eth 与 sue 均使用） */
 	uint32_t timeout_us;         /* sender：事务超时回收（0 = 不回收） */
@@ -146,6 +150,7 @@ struct flow_ctx {
 	uint8_t  owner[ID_SPACE];             /* ID → 所属发送核：ID 按连续段分给各发送核，减少各核写 ts / outst 的伪共享 */
 	struct flow_addr addr;
 	struct rte_mempool *rx_pool;
+	struct rte_ring *xq;                  /* E100c 多流：别的流转交来的响应（ID | 数据字节 << 16）；其他情况为 NULL */
 	struct rte_mempool *tmpl_pool;        /* 预填模板：sender 请求 / reflector 读响应 */
 	uint16_t req_len;                     /* sender：请求帧长 */
 	bool     read;                        /* sender：本流为读（false 为写） */

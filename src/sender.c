@@ -96,7 +96,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 			if (seq) { id = next_id; next_id = (id + 1) & (ID_SPACE - 1); }
 			else id = L->idq[tail++ & (ID_SPACE - 1)];
 			axi_req_set(p, rd, id, beats, uport, tsn++);
-			c->ts[id] = now;
+			if (k == 0 && g_cfg.req_tag) put_be16(rte_pktmbuf_mtod(tx[i], uint8_t *) + 6, (uint16_t)id);   /* --req-tag：OISA tag_id = AXI ID */			c->ts[id] = now;
 			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
 		}
 		tx[i]->data_len = tx[i]->pkt_len = len;
@@ -128,13 +128,25 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		if (pool) for (uint16_t k = 0; k < ntx; k++) __atomic_store_n(&c->lane[k].idq_head, head[k], __ATOMIC_RELEASE);
 	}
 	uint16_t nr = rte_eth_rx_burst(c->port, c->q, rx, MAX_BURST);
-	if (nr == 0) return 0;
-	s->rx_hits++;
+	void *xfer[MAX_BURST];                       /* 别的流转交来的响应（E100c 合并的帧只能进一个队列） */
+	const unsigned nx = c->xq ? rte_ring_sc_dequeue_burst(c->xq, xfer, MAX_BURST, NULL) : 0;
+	if (nr == 0 && nx == 0) return 0;
+	if (nr) s->rx_hits++;
 
 	const uint16_t hl = hdr_len();
 	const uint64_t wdata = (uint64_t)g_cfg.beats * BEAT;
 	uint64_t now = rte_rdtsc(), done = 0;
 	for (uint16_t k = 0; k < ntx; k++) head[k] = c->lane[k].idq_head;
+	for (unsigned x = 0; x < nx; x++) {
+		const uint64_t v = (uint64_t)(uintptr_t)xfer[x];
+		const uint32_t id = (uint32_t)(v & 0xFFFF);
+		if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }
+		hist_add(s, now - c->ts[id]);
+		__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
+		if (pool) { const uint8_t o = c->owner[id]; c->lane[o].idq[head[o]++ & (ID_SPACE - 1)] = (uint16_t)id; }
+		done++;
+		s->data_bytes += c->read ? (v >> 16) : wdata;
+	}
 	rxd_record(s, c->port, rx, nr, now);
 	for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rx_prefetch(rx[i]);
 	for (uint16_t i = 0; i < nr; i++) {
@@ -161,6 +173,13 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		if (bad) { s->err++; dump_bad(s, c->port, "bad AXI payload", m); }
 		for (int j = 0; j < k; j++) {
 			uint32_t id = ids[j];
+			if (c->xq && (id & (g_cfg.fpp - 1)) != c->flow) {   /* 各流 source id 不同，这样的合并是 E100c 的错误：记错并转交销账 */
+				struct flow_ctx *t = c - c->flow + (id & (g_cfg.fpp - 1));
+				s->err++;
+				if (s->err <= 3) dump_bad(s, c->port, "E100c merged responses of different sources", m);
+				if (rte_ring_mp_enqueue(t->xq, (void *)(uintptr_t)(id | ((uint64_t)data[j] << 16))) != 0) s->err++;
+				continue;
+			}
 			if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }   /* 重复 / 超时回收后迟到 */
 			hist_add(s, now - c->ts[id]);        /* 清零前读：清零后 TX 可能立即复用并改写 ts */
 			__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
@@ -174,7 +193,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 			if (head[k] != c->lane[k].idq_head) __atomic_store_n(&c->lane[k].idq_head, head[k], __ATOMIC_RELEASE);
 	s->txn_done += done;
 	__atomic_store_n(&c->done_txn, c->done_txn + done, __ATOMIC_RELEASE);
-	rte_pktmbuf_free_bulk(rx, nr);
+	if (nr) rte_pktmbuf_free_bulk(rx, nr);
 	s->busy_cyc += rte_rdtsc() - t_s;
 	return nr;
 }

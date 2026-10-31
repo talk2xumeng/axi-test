@@ -56,7 +56,8 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 		hdr_build(t->buf, &c->addr.dst, &c->addr.src, c->read ? VC_AR : VC_AW, (uint16_t)req_pack(c->read), plen);
 		t->len = (uint16_t)(hl + plen);
 		if (t->len < g_cfg.min_frame) t->len = g_cfg.min_frame;   /* buf 已清 0，多出的就是补齐字节 */
-		if (g_cfg.ethertype) oisa_request(t->buf, c->read, (uint16_t)req_pack(c->read), t->len);
+		if (g_cfg.ethertype)
+			oisa_request(t->buf, c->read, (uint16_t)req_pack(c->read), (uint16_t)(hl + plen), c->flow);
 		c->req_len = t->len;
 	} else {
 		memset(t->buf + hl, 0x5A, MAX_BEATS * (R_HDR + BEAT));
@@ -92,14 +93,14 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
 }
 
 
-/* E100c 响应：OISA tag（第 6~7 字节，等于请求 ID）的低位决定队列；tag 在以太头 src 地址的前两字节。nq 为 2 的幂 */
-static int steer_tag(uint16_t pi, uint16_t q, uint16_t nq)
+/* E100c 响应：OISA dest id（第 8~9 字节，等于请求的 source id = 基址 + 流号）的低位决定队列；第 9 字节是以太头 src 地址的 addr_bytes[3]。nq 为 2 的幂 */
+static int steer_tag(uint16_t pi, uint16_t q, uint16_t nq, uint8_t src_base)
 {
 	struct rte_flow_attr attr = { .ingress = 1 };
 	struct rte_flow_item_eth spec, mask;
 	memset(&spec, 0, sizeof(spec)); memset(&mask, 0, sizeof(mask));
-	spec.hdr.src_addr.addr_bytes[1] = (uint8_t)q;
-	mask.hdr.src_addr.addr_bytes[1] = (uint8_t)(nq - 1);
+	spec.hdr.src_addr.addr_bytes[3] = (uint8_t)((src_base + q) & (nq - 1));
+	mask.hdr.src_addr.addr_bytes[3] = (uint8_t)(nq - 1);
 	spec.hdr.ether_type = rte_cpu_to_be_16(g_cfg.ethertype);
 	mask.hdr.ether_type = RTE_BE16(0xFFFF);
 	struct rte_flow_item pat[] = {
@@ -411,6 +412,11 @@ void port_init(uint16_t pi)
 		snprintf(name, sizeof(name), "tmpl%u_%u", pi, q);
 		c->tmpl_pool = rte_pktmbuf_pool_create(name, TX_POOL_N, POOL_CACHE, 0, RTE_PKTMBUF_HEADROOM + TMPL_ROOM, socket);
 		if (!c->tmpl_pool) rte_exit(EXIT_FAILURE, "tmpl pool %u.%u\n", pi, q);
+		if (g_cfg.ethertype && g_cfg.sender && g_cfg.fpp > 1) {
+			snprintf(name, sizeof(name), "xq%u_%u", pi, q);
+			c->xq = rte_ring_create(name, 1024, socket, RING_F_SC_DEQ);
+			if (!c->xq) rte_exit(EXIT_FAILURE, "xq %u.%u\n", pi, q);
+		}
 		rte_mempool_obj_iter(c->tmpl_pool, tmpl_obj_init, &g_tmpl[fi]);
 	}
 	if (g_cfg.rx_split) split_configure(pi);
@@ -444,7 +450,7 @@ void port_init(uint16_t pi)
 		    rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)a, 0) < 0)
 			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, c->flow);
 		int pcp = m == 1 ? -1 : g_cfg.sender ? (c->read ? VC_R : VC_B) : (c->read ? VC_AR : VC_AW);
-		if (g_cfg.ethertype && g_cfg.sender) { if (nq > 1) bad |= steer_tag(pi, q, nq); }
+		if (g_cfg.ethertype && g_cfg.sender) { if (nq > 1) bad |= steer_tag(pi, q, nq, a->addr_bytes[5]); }
 		else bad |= steer_flow(pi, a, pcp, q);
 	}
 	if (bad && m == 2) rte_exit(EXIT_FAILURE, "rw 需要按 PCP 导流，规则建立失败\n");

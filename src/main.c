@@ -36,7 +36,7 @@ struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
 	.rxd = NB_RXD, .time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
 	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1, .tx_cores = 1,
-	.sue_ethertype = 0x88B5, .sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
+	.req_b1 = -1, .sue_ethertype = 0x88B5,.sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
 };
 volatile bool g_quit;
 struct flow_ctx g_flow[MAX_FLOWS];
@@ -110,6 +110,8 @@ static void usage(void)
 	"  --count N                sender：每个发送上下文发满 N 个请求包后不再发（进程仍运行到 --time 结束）；0 = 不限 [0]\n"
 	"  --b-port N               reflector：写响应 B 的 port id（W0[7:5]），0~7 [0]\n"
 	"  --b-tag X                reflector：--ethertype 时写响应 EtherType 后的 16 位 [0]\n"
+	"  --req-b1 X               sender 调试：请求 OISA 头第 1 字节（format + packet type）\n"
+	"  --req-tag 0|1            sender 调试：1 = 请求的 tag 填 AXI ID [0]\n"
 	"  --min-frame N            请求、响应都补 0 到 N 字节，不含 FCS（线上 N+4）[不补]\n"
 	"  --brief                  精简输出：每秒只打所有流合并的结果（二层速率、AXI、RTT、err / lost），不打每流明细和调试列\n"
 	"  --rxd N                  每个接收队列的描述符数，2 的幂、64~32768 [1024]；--rx-split 高包率时建议 4096\n"
@@ -157,7 +159,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -166,7 +168,7 @@ static void parse_args(int argc, char **argv)
 {
 	static const struct option lo[] = {
 		{"mode", 1, 0, OPT_MODE}, {"op", 1, 0, OPT_OP}, {"window", 1, 0, OPT_WINDOW}, {"pack", 1, 0, OPT_PACK},
-		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
+		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
 		{"vid", 1, 0, OPT_VID}, {"nosplit", 0, 0, OPT_NOSPLIT}, {"dump", 1, 0, OPT_DUMP}, {"flows", 1, 0, OPT_FLOWS},
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
@@ -195,6 +197,9 @@ static void parse_args(int argc, char **argv)
 		case OPT_TIME:    g_cfg.time = (int)num(optarg); break;
 		case OPT_COUNT:   g_cfg.count = strtoull(optarg, NULL, 0); break;
 		case OPT_BTAG:    g_cfg.b_tag = (uint16_t)strtoul(optarg, NULL, 0); break;
+		case OPT_RUSER:   g_cfg.r_user = (uint32_t)strtoul(optarg, NULL, 0); break;
+		case OPT_REQB1:   g_cfg.req_b1 = (int)strtol(optarg, NULL, 0) & 0xFF; break;
+		case OPT_REQTAG:  g_cfg.req_tag = strtol(optarg, NULL, 0) != 0; break;
 		case OPT_MINFRAME:
 			g_cfg.min_frame = (uint16_t)strtoul(optarg, NULL, 0);
 			if (g_cfg.min_frame > 1500) { printf("--min-frame 须 ≤ 1500\n"); exit(1); }

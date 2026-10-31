@@ -69,15 +69,15 @@ static inline bool hdr_to_me(const uint8_t *f, const struct rte_ether_addr *me)
  *   2-3    udf(3) length(13)           4-5    res(3) udf(13)
  *   6-7    tag_id                      8-9    hash(6) dest_id(10)
  *   10-11  packing_num(6) source_id(10)
- * tag_id 原样带回，dest_id / source_id 对调。VC：写响应 2、读响应 3；PktType：写响应 3、读响应 5。
- * length：写响应为 0（与 E100c 自己回的写响应相同）；读响应填 payload 长度（待实测确认）。
+ * tag_id 原样带回，dest_id / source_id 对调。前两字节按 E100c 实际报文（osia_10.txt）：写响应 c8 03、读响应 cc 44。
+ * length = 整帧长度（不含 FCS 和补齐）：写响应 16 + 12k，读响应 16 + plen。
  */
 static inline void oisa_reply(uint8_t *f, const uint8_t *req, uint8_t vc, uint16_t ntxn, uint16_t plen)
 {
 	const uint16_t tag = get_be16(req + 6), dest = get_be16(req + 8) & 0x3FF, src = get_be16(req + 10) & 0x3FF;
 	f[0] = (uint8_t)((6u << 5) | (vc << 2));
-	f[1] = vc == VC_B_TAG ? 3 : 5;
-	put_be16(f + 2, vc == VC_B_TAG ? 0 : plen);
+	f[1] = vc == VC_B_TAG ? 0x03 : 0x44;
+	put_be16(f + 2, (uint16_t)(16 + plen));
 	put_be16(f + 4, 0);
 	put_be16(f + 6, tag);
 	put_be16(f + 8, src);
@@ -86,13 +86,15 @@ static inline void oisa_reply(uint8_t *f, const uint8_t *req, uint8_t vc, uint16
 
 /*
  * OISA 请求头：在 hdr_build 写好的地址上填 VC、packet_type、length、packing_num。
- * 读请求 VC=1、PktType=4；写请求的前两字节沿用 E100c 样例 c0 c0（邮件的 PktType=2 待确认）。
+ * 取值以 E100c 实际报文（osia_10.txt）为准，和文档 / 邮件的 PktType 不同。
  */
-static inline void oisa_request(uint8_t *f, bool read, uint16_t ntxn, uint16_t len)
+static inline void oisa_request(uint8_t *f, bool read, uint16_t ntxn, uint16_t len, uint16_t flow)
 {
-	if (read) { f[0] = (uint8_t)((6u << 5) | (1u << 2)); f[1] = 4; }
-	put_be16(f + 2, len);
-	put_be16(f + 10, (uint16_t)((ntxn << 10) | (get_be16(f + 10) & 0x3FF)));
+	/* 前两字节按 E100c 实际报文（osia_10.txt）：写 c0 c0、读 c4 82 */
+	if (read) { f[0] = (uint8_t)((6u << 5) | (1u << 2)); f[1] = 0x82; }
+	if (g_cfg.req_b1 >= 0) f[1] = (uint8_t)g_cfg.req_b1;   /* --req-b1：调试 format / packet_type */
+	put_be16(f + 2, len);                   /* length = 本帧 AXI 数据字节数，读请求为 0 */
+	put_be16(f + 10, (uint16_t)((ntxn << 10) | ((get_be16(f + 10) + flow) & 0x3FF)));   /* 各流 source id 不同 */
 }
 
 /* 原地把请求帧头改为响应帧头：交换源 / 目的地址，改 VC、事务个数、长度 */
