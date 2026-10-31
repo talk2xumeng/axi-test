@@ -254,8 +254,8 @@ static void parse_args(int argc, char **argv)
 		default: usage(); exit(1);
 		}
 	}
-	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.fpp != 1 || g_cfg.rw || g_cfg.mix)) {
-		printf("--ethertype 的 sender 只支持 --flows 1 的单写 / 单读（响应不能按 DMAC、PCP 导流）\n");
+	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || g_cfg.mix || (g_cfg.fpp & (g_cfg.fpp - 1)) || g_cfg.fpp * g_cfg.window > 512)) {
+		printf("--ethertype 的 sender 只支持单写 / 单读，--flows 须为 2 的幂，且 flows × window ≤ 512（各流共用 E100c 的 ID）\n");
 		exit(1);
 	}
 	if (g_cfg.count && (!g_cfg.sender || g_cfg.tx_cores > 1)) { printf("--count 只用于 sender，且不能与 --tx-cores > 1 同用\n"); exit(1); }
@@ -342,10 +342,16 @@ int main(int argc, char **argv)
 	for (uint16_t i = 0; i < g_nb_flows; i++) {      /* 空闲 ID 池：0 .. window-1 按连续段均分给各发送核 */
 		struct flow_ctx *c = &g_flow[i];
 		const int W = g_cfg.window, N = c->ntx;
+		/* E100c：各流共用 ID 空间，响应按 tag（= ID）低位导流，所以流 f 用 ID ≡ f (mod 流数) */
+		const bool shared = g_cfg.ethertype && g_cfg.sender;
+		const int step = shared ? g_cfg.fpp : 1, base = shared ? c->flow : 0;
 		for (int k = 0; k < N; k++) {
 			struct tx_lane *L = &c->lane[k];
 			const int lo = k * W / N, hi = (k + 1) * W / N;
-			for (int id = lo; id < hi; id++) { L->idq[id - lo] = (uint16_t)id; c->owner[id] = (uint8_t)k; }
+			for (int x = lo; x < hi; x++) {
+				const int id = base + x * step;
+				L->idq[x - lo] = (uint16_t)id; c->owner[id] = (uint8_t)k;
+			}
 			L->idq_head = (uint32_t)(hi - lo);
 		}
 	}

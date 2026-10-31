@@ -92,6 +92,29 @@ static int steer_flow(uint16_t pi, const struct rte_ether_addr *mac, int pcp, ui
 }
 
 
+/* E100c 响应：OISA tag（第 6~7 字节，等于请求 ID）的低位决定队列；tag 在以太头 src 地址的前两字节。nq 为 2 的幂 */
+static int steer_tag(uint16_t pi, uint16_t q, uint16_t nq)
+{
+	struct rte_flow_attr attr = { .ingress = 1 };
+	struct rte_flow_item_eth spec, mask;
+	memset(&spec, 0, sizeof(spec)); memset(&mask, 0, sizeof(mask));
+	spec.hdr.src_addr.addr_bytes[1] = (uint8_t)q;
+	mask.hdr.src_addr.addr_bytes[1] = (uint8_t)(nq - 1);
+	spec.hdr.ether_type = rte_cpu_to_be_16(g_cfg.ethertype);
+	mask.hdr.ether_type = RTE_BE16(0xFFFF);
+	struct rte_flow_item pat[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .spec = &spec, .mask = &mask },
+		{ .type = RTE_FLOW_ITEM_TYPE_END } };
+	struct rte_flow_action_queue qa = { .index = q };
+	struct rte_flow_action act[] = {
+		{ .type = RTE_FLOW_ACTION_TYPE_QUEUE, .conf = &qa },
+		{ .type = RTE_FLOW_ACTION_TYPE_END } };
+	struct rte_flow_error err;
+	if (rte_flow_create(pi, &attr, pat, act, &err)) return 0;
+	printf("警告：port %u 按 tag 导流到 queue %u 失败（%s）\n", pi, q, err.message ? err.message : "?");
+	return -1;
+}
+
 /* ---------------- --rx-split：同一对 MAC 按随机值均分到 N 个接收队列（mlx5 HW steering，模板 / 异步 API） ----------------
  *
  * 经 E100c 后反射端只看到一对 MAC、一个 VID，按地址导流只能进一个队列、一个核。
@@ -421,7 +444,8 @@ void port_init(uint16_t pi)
 		    rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)a, 0) < 0)
 			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, c->flow);
 		int pcp = m == 1 ? -1 : g_cfg.sender ? (c->read ? VC_R : VC_B) : (c->read ? VC_AR : VC_AW);
-		bad |= steer_flow(pi, a, pcp, q);
+		if (g_cfg.ethertype && g_cfg.sender) { if (nq > 1) bad |= steer_tag(pi, q, nq); }
+		else bad |= steer_flow(pi, a, pcp, q);
 	}
 	if (bad && m == 2) rte_exit(EXIT_FAILURE, "rw 需要按 PCP 导流，规则建立失败\n");
 	if (g_cfg.promisc || g_cfg.hdr == HDR_SUE || bad || g_cfg.ethertype) {
