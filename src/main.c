@@ -103,6 +103,14 @@ static void usage(void)
 	"                            默认 02:00:00:00:01:0PORT；测试时请显式设置\n"
 	"  --one-dmac               sender 各流请求都发往 --dmac 给出的同一个 MAC，不按流派生\n"
 	"                            （多源 MAC → 单一目的 MAC；反射端用 --flows 1）\n"
+	"  --no-len                 eth 头不带 Length，事务头紧跟 802.1Q 标签（E100c 格式）；两端都要设\n"
+	"  --ethertype X            不带 802.1Q，帧头为 EtherType + 0000、无 Length（E100c 用 0x88ee）；不核对 PCP，\n"
+	"                            两端都开混杂、不核对 DMAC；sender 只支持 --flows 1 的单写 / 单读\n"
+	"  --smac MAC               sender：流 0 的 SMAC，其余流由它派生 [网卡真实 MAC]\n"
+	"  --count N                sender：每个发送上下文发满 N 个请求包后不再发（进程仍运行到 --time 结束）；0 = 不限 [0]\n"
+	"  --b-port N               reflector：写响应 B 的 port id（W0[7:5]），0~7 [0]\n"
+	"  --b-tag X                reflector：--ethertype 时写响应 EtherType 后的 16 位 [0]\n"
+	"  --min-frame N            请求、响应都补 0 到 N 字节，不含 FCS（线上 N+4）[不补]\n"
 	"  --brief                  精简输出：每秒只打所有流合并的结果（二层速率、AXI、RTT、err / lost），不打每流明细和调试列\n"
 	"  --rxd N                  每个接收队列的描述符数，2 的幂、64~32768 [1024]；--rx-split 高包率时建议 4096\n"
 	"  --rx-split N             reflector：同一对 MAC 的请求由网卡按随机值均分到 N 个接收队列，各一个核\n"
@@ -140,7 +148,7 @@ static bool help_requested(int argc, char **argv)
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) return true;
 		/* 以下为不取值的应用选项；其他长选项的下一项是它的值。 */
 		if (!strcmp(argv[i], "--nosplit") || !strcmp(argv[i], "--id-seq") ||
-		    !strcmp(argv[i], "--hwts") || !strcmp(argv[i], "--promisc") || !strcmp(argv[i], "--one-dmac") || !strcmp(argv[i], "--brief")) continue;
+		    !strcmp(argv[i], "--hwts") || !strcmp(argv[i], "--promisc") || !strcmp(argv[i], "--one-dmac") || !strcmp(argv[i], "--brief") || !strcmp(argv[i], "--no-len")) continue;
 		if (!strncmp(argv[i], "--", 2) && !strchr(argv[i], '=') && i + 1 < argc) i++;
 	}
 	return false;
@@ -149,7 +157,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -158,12 +166,12 @@ static void parse_args(int argc, char **argv)
 {
 	static const struct option lo[] = {
 		{"mode", 1, 0, OPT_MODE}, {"op", 1, 0, OPT_OP}, {"window", 1, 0, OPT_WINDOW}, {"pack", 1, 0, OPT_PACK},
-		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"dmac", 1, 0, OPT_DMAC},
+		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
 		{"vid", 1, 0, OPT_VID}, {"nosplit", 0, 0, OPT_NOSPLIT}, {"dump", 1, 0, OPT_DUMP}, {"flows", 1, 0, OPT_FLOWS},
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"brief", 0, 0, OPT_BRIEF}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"brief", 0, 0, OPT_BRIEF}, {"no-len", 0, 0, OPT_NOLEN}, {"smac", 1, 0, OPT_SMAC}, {"ethertype", 1, 0, OPT_ETHERTYPE}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -185,6 +193,17 @@ static void parse_args(int argc, char **argv)
 		case OPT_BEATS:   g_cfg.beats = (int)num(optarg); break;
 		case OPT_BURST:   g_cfg.burst = (int)num(optarg); break;
 		case OPT_TIME:    g_cfg.time = (int)num(optarg); break;
+		case OPT_COUNT:   g_cfg.count = strtoull(optarg, NULL, 0); break;
+		case OPT_BTAG:    g_cfg.b_tag = (uint16_t)strtoul(optarg, NULL, 0); break;
+		case OPT_MINFRAME:
+			g_cfg.min_frame = (uint16_t)strtoul(optarg, NULL, 0);
+			if (g_cfg.min_frame > 1500) { printf("--min-frame 须 ≤ 1500\n"); exit(1); }
+			break;
+		case OPT_BPORT: {
+			long n = strtol(optarg, NULL, 0);
+			if (n < 0 || n > 7) { printf("--b-port 须为 0~7\n"); exit(1); }
+			g_cfg.b_port = (uint8_t)n;
+			break; }
 		case OPT_VID:     g_cfg.vid = (int)num(optarg) & 0xFFF; break;
 		case OPT_NOSPLIT: g_cfg.split = false; break;
 		case OPT_PROMISC: g_cfg.promisc = true; break;
@@ -192,6 +211,15 @@ static void parse_args(int argc, char **argv)
 		case OPT_RXSPLIT: g_cfg.rx_split = (int)num(optarg); break;
 		case OPT_RXD:     g_cfg.rxd = (int)num(optarg); break;
 		case OPT_BRIEF:   g_cfg.brief = true; break;
+		case OPT_NOLEN:   g_cfg.no_len = true; break;
+		case OPT_ETHERTYPE:
+			g_cfg.ethertype = (uint16_t)num(optarg);
+			g_cfg.no_len = true;
+			break;
+		case OPT_SMAC:
+			if (rte_ether_unformat_addr(optarg, &g_cfg.smac) < 0) { usage(); exit(1); }
+			g_cfg.has_smac = true;
+			break;
 		case OPT_TIMEOUT: g_cfg.timeout_us = (uint32_t)num(optarg); break;
 		case OPT_DROP:    g_cfg.drop_every = (uint32_t)num(optarg); break;
 		case OPT_BPACK:   g_cfg.b_pack = (int)num(optarg); break;
@@ -226,6 +254,11 @@ static void parse_args(int argc, char **argv)
 		default: usage(); exit(1);
 		}
 	}
+	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.fpp != 1 || g_cfg.rw || g_cfg.mix)) {
+		printf("--ethertype 的 sender 只支持 --flows 1 的单写 / 单读（响应不能按 DMAC、PCP 导流）\n");
+		exit(1);
+	}
+	if (g_cfg.count && (!g_cfg.sender || g_cfg.tx_cores > 1)) { printf("--count 只用于 sender，且不能与 --tx-cores > 1 同用\n"); exit(1); }
 	if (g_cfg.rxd < 64 || g_cfg.rxd > 32768 || (g_cfg.rxd & (g_cfg.rxd - 1))) { printf("--rxd 须为 2 的幂、64~32768\n"); exit(1); }
 	if (g_cfg.rx_split) {
 		const int n = g_cfg.rx_split;

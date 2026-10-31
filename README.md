@@ -112,6 +112,10 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--b-pack` | 1 | reflector：同一批收到的写请求，其 B 合并进一个响应包，每包最多 N 个（1~16，VC2 上限 16），减少写方向反射端发包数与发送端收包数 |
 | `--tx-cores` | 1 | 发送端每条流的发送核数（1~4）。同一 MAC、同一接收队列和接收核，每个发送核独占一个发送队列和一段连续 ID（窗口均分，如 511、2 核为 0–254 / 255–510），接收核把完成的 ID 还给所属发送核。核数为每条流 1 + N 个，按“发送核 0..N−1、接收核”顺序分配。只用于收发分核、空闲 ID 池模式。单流满载时发送核排队约 1 µs，2 核可降这部分并提高包率。不同发送队列之间在线上可能乱序（不同 ID 之间） |
 | `--hwts` | 关 | 开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd50us / rxd99us 列，两端都可用）。网卡时钟每秒与 TSC 对齐一次，偏差约 ±0.5 µs；rxdneg 为换算为负的样本数，持续增长说明对时不准 |
+| `--b-port` | 0 | reflector：写响应 B 的 port id（W0[7:5]），0~7 |
+| `--b-tag` | 0 | reflector：`--ethertype` 时写响应 EtherType 后的 16 位 |
+| `--min-frame` | 0 | 请求、响应都补 0 到 N 字节，不含 FCS（线上 N+4）；0 = 不补。E100c 要求至少 512 字节（含 FCS），即 508 |
+| `--count` | 0 | sender：每个发送上下文发满 N 个请求包后不再发，进程仍运行到 `--time` 结束；0 = 不限。窗口小于 N 时，收不到响应就发不满 |
 | `--brief` | 关 | 精简输出，多流时好看：每秒只打所有流、所有端口合并的结果，rw / mix 分 w、r、all 三行。列：txL2G / rxL2G（二层速率，帧长，不含 FCS、前导码、帧间隔）、dataG、txnM/s、RTT p50 / p99 / p999（本次间隔，退出时为全程）、maxus（累计最大）、err、lost、bad（xmac + pcpx）、miss（imissed + nombuf，只在 all 行）、busy%（最忙核）。启动时也不打每流绑核行 |
 | `--id-seq` | 关 | sender：ID 按顺序分配（旧方式）。默认用空闲 ID 池：RX 核把完成的 ID 放回环，TX 核从环里取，完成即可复用，不会被最老的在途 ID 挡住（顺序分配时单流平均在途约 447/511）。两种方式都在 9 bit ID 空间内，任一时刻同一 ID 只在途一次 |
 | `--timeout-us` | 10000 | sender：事务超时回收并计入 lost；0 为不回收（丢一个包该流就会停住） |
@@ -122,6 +126,9 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--vid` | 0 | 802.1Q VID（过交换机时填交换机上的 VLAN） |
 | `--promisc` | — | 强制混杂模式（默认 eth 头只收本端各流 MAC） |
 | `--dmac` | — | eth：`PORT,xx:xx:xx:xx:xx:xx`，对端网卡真实 MAC，可重复 |
+| `--no-len` | 关 | eth 头不带 Length，事务头紧跟 802.1Q 标签，从第 16 字节开始（E100c 格式）；接收端按帧长解析，遇到全 0 的 W0 视为补齐。两端都要设 |
+| `--ethertype` | 关 | 不带 802.1Q，帧头为 EtherType + 0000、无 Length（E100c 用 `0x88ee`）。不核对 PCP；两端都开混杂、不核对 DMAC，只支持 `--flows 1` 的单写 / 单读 |
+| `--smac` | 网卡真实 MAC | sender：流 0 的 SMAC，其余流按规则派生。响应的 DMAC 也要是这个地址 |
 | `--e100c-port` | 0 | sender：`PORT,N`，DPDK 端口 PORT 所接 E100c 的 ETH 口号 N（1~4），写入每个请求的 user.port（awuser[51:49] / aruser[48:46]），可为各端口重复设置；未设填 0。实际连线须与口号一致 |
 | `--gpu-id` | — | sue：本端 GPU ID 基址（必填） |
 | `--peer-gpu-id` | — | sue：sender 的对端 GPU ID 基址（必填） |

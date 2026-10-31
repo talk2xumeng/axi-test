@@ -28,7 +28,7 @@ static inline uint16_t hdr_len(void)
 {
 	switch (g_cfg.hdr) {
 	case HDR_SUE: return SUE_HDR_LEN;
-	default:      return ETH_HDR_LEN;
+	default:      return g_cfg.no_len ? ETH_HDR_NOLEN : ETH_HDR_LEN;
 	}
 }
 
@@ -63,10 +63,32 @@ static inline bool hdr_to_me(const uint8_t *f, const struct rte_ether_addr *me)
 	return x == y && u == v;
 }
 
+/*
+ * OISA 10b 响应头（--ethertype）。前 12 字节不是 MAC，而是：
+ *   byte0  version(3) vc(3) udf(2)     byte1  format(3) packet_type(5)
+ *   2-3    udf(3) length(13)           4-5    res(3) udf(13)
+ *   6-7    tag_id                      8-9    hash(6) dest_id(10)
+ *   10-11  packing_num(6) source_id(10)
+ * tag_id 原样带回，dest_id / source_id 对调。VC：写响应 2、读响应 3；PktType：写响应 3、读响应 5。
+ * length：写响应为 0（与 E100c 自己回的写响应相同）；读响应填 payload 长度（待实测确认）。
+ */
+static inline void oisa_reply(uint8_t *f, const uint8_t *req, uint8_t vc, uint16_t ntxn, uint16_t plen)
+{
+	const uint16_t tag = get_be16(req + 6), dest = get_be16(req + 8) & 0x3FF, src = get_be16(req + 10) & 0x3FF;
+	f[0] = (uint8_t)((6u << 5) | (vc << 2));
+	f[1] = vc == VC_B_TAG ? 3 : 5;
+	put_be16(f + 2, vc == VC_B_TAG ? 0 : plen);
+	put_be16(f + 4, 0);
+	put_be16(f + 6, tag);
+	put_be16(f + 8, src);
+	put_be16(f + 10, (uint16_t)((ntxn << 10) | dest));
+}
+
 /* 原地把请求帧头改为响应帧头：交换源 / 目的地址，改 VC、事务个数、长度 */
 static inline void hdr_reply(uint8_t *f, uint8_t vc, uint16_t ntxn, uint16_t plen)
 {
 	uint8_t t[6];
+	if (g_cfg.ethertype) { oisa_reply(f, f, vc, ntxn, plen); eth_update(f, vc, ntxn, plen); return; }
 	memcpy(t, f, 6); memcpy(f, f + 6, 6); memcpy(f + 6, t, 6);
 	switch (g_cfg.hdr) {
 	case HDR_SUE: sue_update(f, vc, ntxn, plen); break;
@@ -78,6 +100,7 @@ static inline void hdr_reply(uint8_t *f, uint8_t vc, uint16_t ntxn, uint16_t ple
 static inline void hdr_reply_to(uint8_t *f, const uint8_t *req, uint8_t vc, uint16_t ntxn, uint16_t plen)
 {
 	hdr_build(f, (const struct rte_ether_addr *)(req + 6), (const struct rte_ether_addr *)req, vc, ntxn, plen);
+	if (g_cfg.ethertype) oisa_reply(f, req, vc, ntxn, plen);
 }
 
 /* ---------------- 非快路径（hdr.c） ---------------- */

@@ -20,12 +20,12 @@ enum { VC_AW = 0, VC_AR = 1, VC_B = 2, VC_R = 3, VC_NONE = 0xFF };
 enum { FT_WRFULL = 0x0, FT_WR = 0x1, FT_B = 0x2, FT_AR = 0x3, FT_R = 0x4 };
 
 /* ---------------- 事务头 W0 ---------------- */
-static inline uint32_t axi_w0_aw(uint32_t id, uint32_t beats)   /* writefull，writeFull=1111 */
-{ return ((uint32_t)FT_WRFULL << 28) | (id << 19) | ((beats - 1) << 17) | (0xFu << 13); }
+static inline uint32_t axi_w0_aw(uint32_t id, uint32_t beats)   /* writefull，writeFull 每拍 1 位：2 拍 0011，4 拍 1111 */
+{ return ((uint32_t)FT_WRFULL << 28) | (id << 19) | ((beats - 1) << 17) | (((1u << beats) - 1) << 13); }
 static inline uint32_t axi_w0_ar(uint32_t id)
 { return ((uint32_t)FT_AR << 28) | (id << 19); }
 static inline uint32_t axi_w0_b(uint32_t id)                    /* BRESP=00 */
-{ return ((uint32_t)FT_B << 28) | (id << 19); }
+{ return ((uint32_t)FT_B << 28) | (id << 19) | ((uint32_t)g_cfg.b_port << 5); }   /* --b-port：与 AW 的 port 同在 W0[7:5] */
 static inline uint32_t axi_w0_r(uint32_t id, uint32_t beats)    /* rlast=1，RRESP=00 */
 { return ((uint32_t)FT_R << 28) | (id << 19) | ((beats - 1) << 17) | (1u << 3); }
 
@@ -119,6 +119,7 @@ static inline int axi_rsp_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, 
 		uint32_t w0 = get_be32(p + off), ft = axi_ft(w0), step;
 		if (vc == VC_B && ft == FT_B) { step = B_RSP; data[k] = 0; }
 		else if (vc == VC_R && ft == FT_R) { data[k] = axi_beats(w0) * BEAT; step = R_HDR + data[k]; }
+		else if (g_cfg.no_len && w0 == 0) break;             /* 没有 Length 时，全 0 是短帧的补齐字节 */
 		else { *bad = true; break; }
 		if (off + step > plen) { *bad = true; break; }
 		ids[k++] = axi_id(w0);
@@ -136,9 +137,11 @@ static inline int axi_aw_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, u
 	while (off < plen && k < MAX_TXN && (ntxn == 0 || k < ntxn)) {
 		if (off + AW_HDR > plen) { *bad = true; break; }
 		uint32_t w0 = get_be32(p + off), ft = axi_ft(w0), b = axi_beats(w0);
+		if (g_cfg.no_len && w0 == 0) break;                  /* 没有 Length 时，全 0 是补齐字节（真实事务的 writeFull 非 0） */
 		if (ft == FT_WRFULL) off += (uint16_t)(AW_HDR + b * BEAT);
 		else if (ft == FT_WR) off += (uint16_t)(AW_HDR + b * (WSTRB_LEN + BEAT));
 		else { *bad = true; break; }
+		if (off > plen) { *bad = true; break; }
 		ids[k++] = axi_id(w0);
 	}
 	if (ntxn && k != ntxn) *bad = true;
@@ -163,6 +166,7 @@ static inline int axi_ar_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, u
 	*bad = false;
 	while (off + AR_HDR <= plen && k < MAX_TXN && (ntxn == 0 || k < ntxn)) {
 		uint32_t w0 = get_be32(p + off), w3 = get_be32(p + off + 12);
+		if (g_cfg.no_len && w0 == 0) break;                  /* 没有 Length 时，全 0 是短帧的补齐字节 */
 		if (axi_ft(w0) != FT_AR) { *bad = true; break; }
 		ids[k] = axi_id(w0);
 		beats[k] = ((w3 >> 3) & 3) + 1;                      /* arlen */

@@ -81,6 +81,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 		n = div_pack((int)(__atomic_load_n(&L->idq_head, __ATOMIC_ACQUIRE) - tail), pack);
 		if (n > g_cfg.burst) n = g_cfg.burst;
 	}
+	if (g_cfg.count && (uint64_t)n > g_cfg.count - s->tx_pkts) n = (int)(g_cfg.count - s->tx_pkts);   /* --count：发满为止 */
 	if (n <= 0) return 0;                        /* 窗口满或 ID 被占：不计 busy，也不读 TSC */
 	uint64_t t_s = rte_rdtsc();
 	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
@@ -146,12 +147,12 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		int r = hdr_parse(f, m->pkt_len, &hi);
 		if (r == HDR_IGNORE) { s->ign++; continue; }
 		if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); continue; }
-		if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; continue; }   /* 不是发给本流的（泛洪副本等） */
+		if (!g_cfg.ethertype && !hdr_to_me(f, &c->addr.src)) { s->xmac++; continue; }   /* 不是发给本流的（泛洪副本等） */
 
 		uint8_t *p = f + hl, ft0 = p[0] >> 4;          /* 按 frame_type 分发，PCP 只做核对 */
 		if (ft0 != FT_B && ft0 != FT_R) { s->err++; dump_bad(s, c->port, "unexpected frame_type", m); continue; }
 		uint8_t vc = ft0 == FT_B ? VC_B : VC_R;
-		if (hi.vc != vc) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
+		if (hi.vc != vc && !g_cfg.ethertype) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
 		tap(&s->dump_rx, c->port, "RX", m);
 
 		uint32_t ids[MAX_TXN], data[MAX_TXN];

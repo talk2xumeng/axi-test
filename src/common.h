@@ -57,7 +57,10 @@ struct config {
 	int    dump;                 /* 打印前 N 帧十六进制 */
 	const char *pcap_path;       /* 抓包模式输出文件 */
 	uint64_t pcap_left;          /* 抓包模式最多写入帧数 */
-
+	uint64_t count;              /* sender：每个发送上下文最多发的请求包数（0 = 不限） */
+	uint8_t  b_port;             /* reflector：写响应 B 的 port id（W0[7:5]），默认 0 */
+	uint16_t b_tag;              /* reflector：--ethertype 时写响应 EtherType 后的 16 位，默认 0 */
+	uint16_t min_frame;          /* 请求、响应都补 0 到该长度（不含 FCS），0 = 不补 */
 	enum hdr_kind hdr;
 	int    vid;                  /* 802.1Q VID（eth 与 sue 均使用） */
 	uint32_t timeout_us;         /* sender：事务超时回收（0 = 不回收） */
@@ -69,6 +72,11 @@ struct config {
 	bool   promisc;
 	bool   one_dmac;             /* sender：各流请求都发往 --dmac 给出的同一个地址，不按流派生 */
 	bool   brief;                /* 精简输出：所有流合并，隐藏调试列 */
+	bool   no_len;               /* eth 头不带 Length，事务头紧跟 802.1Q 标签；接收端按帧长解析（E100c 格式） */
+	uint16_t ethertype;          /* 非 0：不带 802.1Q 标签，帧头 = EtherType + 2 字节 0（隐含 no_len）；不核对 PCP，
+	                                sender 开混杂、不核对响应 DMAC（E100c 响应的 DMAC 不是请求的 SMAC） */
+	bool   has_smac;             /* sender：--smac 指定流 0 的 SMAC，不用网卡真实 MAC */
+	struct rte_ether_addr smac;
 	int    rxd;                  /* 每个接收队列的描述符数（默认 NB_RXD）；MPRQ 时为 stride 总数，WQE 数 = rxd >> mprq_log_stride_num */
 	int    rx_split;             /* reflector：一对 MAC 的请求按网卡随机值分到 N 个接收队列 / 核（0 = 不分）；
 	                                解析后 fpp = N，N 个上下文共用网卡 MAC */

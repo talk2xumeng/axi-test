@@ -55,6 +55,7 @@ static void tmpl_build(struct flow_ctx *c, struct tmpl *t)
 		uint16_t plen = axi_req_build(t->buf + hl, c->read, req_pack(c->read), g_cfg.beats);
 		hdr_build(t->buf, &c->addr.dst, &c->addr.src, c->read ? VC_AR : VC_AW, (uint16_t)req_pack(c->read), plen);
 		t->len = (uint16_t)(hl + plen);
+		if (t->len < g_cfg.min_frame) t->len = g_cfg.min_frame;   /* buf 已清 0，多出的就是补齐字节 */
 		c->req_len = t->len;
 	} else {
 		memset(t->buf + hl, 0x5A, MAX_BEATS * (R_HDR + BEAT));
@@ -161,8 +162,13 @@ static void split_rules(uint16_t pi, const struct rte_ether_addr *mac, int m, in
 	struct rte_flow_item_vlan vm, vs;
 	memset(&em, 0, sizeof(em)); memset(&es, 0, sizeof(es)); memset(&anym, 0, sizeof(anym)); memset(&anys, 0, sizeof(anys));
 	memset(&vm, 0, sizeof(vm)); memset(&vs, 0, sizeof(vs));
-	memset(&em.hdr.dst_addr, 0xFF, RTE_ETHER_ADDR_LEN);
-	es.hdr.dst_addr = *mac;
+	if (g_cfg.ethertype) {                         /* E100c 转发不改 DMAC：按 EtherType 匹配（根表不接受空匹配） */
+		em.hdr.ether_type = RTE_BE16(0xFFFF);
+		es.hdr.ether_type = rte_cpu_to_be_16(g_cfg.ethertype);
+	} else {
+		memset(&em.hdr.dst_addr, 0xFF, RTE_ETHER_ADDR_LEN);
+		es.hdr.dst_addr = *mac;
+	}
 	vm.tci = rte_cpu_to_be_16(0xE000);
 	const struct rte_flow_item p0[] = {
 		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .mask = &em },
@@ -410,14 +416,14 @@ void port_init(uint16_t pi)
 	for (uint16_t q = 0; q < nq && !g_cfg.rx_split; q++) {
 		const struct flow_ctx *c = &g_flow[pi * nq + q];
 		const struct rte_ether_addr *a = &c->addr.src;
-		if (q % m == 0 && g_cfg.hdr == HDR_ETH && c->flow > 0 &&
+		if (q % m == 0 && g_cfg.hdr == HDR_ETH && (c->flow > 0 || g_cfg.has_smac) &&
 		    rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)a, 0) < 0)
 			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, c->flow);
 		int pcp = m == 1 ? -1 : g_cfg.sender ? (c->read ? VC_R : VC_B) : (c->read ? VC_AR : VC_AW);
 		bad |= steer_flow(pi, a, pcp, q);
 	}
 	if (bad && m == 2) rte_exit(EXIT_FAILURE, "rw 需要按 PCP 导流，规则建立失败\n");
-	if (g_cfg.promisc || g_cfg.hdr == HDR_SUE || bad) {
+	if (g_cfg.promisc || g_cfg.hdr == HDR_SUE || bad || g_cfg.ethertype) {
 		rte_eth_promiscuous_enable(pi);
 		if (g_cfg.hdr == HDR_SUE) rte_eth_allmulticast_enable(pi);
 		printf("port %u: 混杂模式%s\n", pi, bad ? "（导流规则失败，退回）" : "");
@@ -446,9 +452,11 @@ void port_init(uint16_t pi)
  */
 void port_announce(void)
 {
+	if (g_cfg.ethertype) return;                   /* E100c 格式没有 802.1Q，也不需要学习地址 */
 	for (uint16_t i = 0; i < g_nb_flows; i++) {
 		struct flow_ctx *c = &g_flow[i];
 		if (c->q % ctx_per_flow()) continue;       /* rw：读上下文与写上下文同一 MAC，只发一次 */
+		if (g_cfg.e100c_port[c->port] || g_cfg.hdr == HDR_SUE) continue;   /* 对端是 E100c，不是交换机：不发它不认识的帧 */
 		struct rte_mbuf *m[4];
 		if (rte_pktmbuf_alloc_bulk(c->rx_pool, m, 4) != 0) continue;
 		for (int k = 0; k < 4; k++) {

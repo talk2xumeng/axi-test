@@ -32,6 +32,14 @@ static inline bool same_src(const uint8_t *a, const uint8_t *b)
 	return a4 == b4 && a2 == b2;
 }
 
+/* --min-frame：响应补 0 到 N 字节（不含 FCS） */
+static inline void frame_pad(struct rte_mbuf *m, uint8_t *f)
+{
+	if (m->data_len >= g_cfg.min_frame) return;
+	memset(f + m->data_len, 0, g_cfg.min_frame - m->data_len);
+	m->data_len = m->pkt_len = g_cfg.min_frame;
+}
+
 /* 合并写响应包收尾：交换地址、写头、定长 */
 static inline void b_finish(struct rte_mbuf *bm, uint16_t n, uint16_t hl)
 {
@@ -39,6 +47,7 @@ static inline void b_finish(struct rte_mbuf *bm, uint16_t n, uint16_t hl)
 	uint16_t plen = (uint16_t)(n * B_RSP);
 	hdr_reply(f, VC_B, n, plen);
 	bm->data_len = bm->pkt_len = (uint32_t)(hl + plen);
+	frame_pad(bm, f);
 }
 
 /* 读响应包收尾：写头、定长 */
@@ -48,6 +57,7 @@ static inline void r_finish(struct rte_mbuf *r, uint8_t *rp, const uint8_t *req,
 	uint16_t plen = (uint16_t)(rp - f - hl);
 	hdr_reply_to(f, req, VC_R, cnt, plen);
 	r->data_len = r->pkt_len = (uint32_t)(hl + plen);
+	frame_pad(r, f);
 }
 
 int reflector_loop(void *arg)
@@ -81,12 +91,12 @@ int reflector_loop(void *arg)
 			int r = hdr_parse(f, m->pkt_len, &hi);
 			if (r == HDR_IGNORE) { s->ign++; fr[nf++] = m; continue; }
 			if (r == HDR_BAD) { s->err++; dump_bad(s, c->port, "bad header", m); fr[nf++] = m; continue; }
-			if (!hdr_to_me(f, &c->addr.src)) { s->xmac++; fr[nf++] = m; continue; }   /* 不是发给本流的：不回 */
+			if (!g_cfg.ethertype && !hdr_to_me(f, &c->addr.src)) { s->xmac++; fr[nf++] = m; continue; }   /* 不是发给本流的：不回 */
 
 			if (g_cfg.drop_every && ++s->dropped % g_cfg.drop_every == 0) { fr[nf++] = m; continue; }  /* 模拟丢包 */
 			uint8_t *p = f + hl;
 			uint8_t vc = axi_req_vc(p[0] >> 4);        /* 按 frame_type 分发，PCP 只做核对 */
-			if (vc != VC_NONE && hi.vc != vc) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
+			if (vc != VC_NONE && hi.vc != vc && !g_cfg.ethertype) { s->pcpx++; if (s->pcpx <= 3) dump_bad(s, c->port, "PCP != VC (rewritten?)", m); }
 			tap(&s->dump_rx, c->port, "RX", m);
 
 			uint32_t ids[MAX_TXN], beats[MAX_TXN];
@@ -99,6 +109,7 @@ int reflector_loop(void *arg)
 					uint16_t plen = axi_b_build(p, ids, k);
 					hdr_reply(f, VC_B, (uint16_t)k, plen);
 					m->data_len = m->pkt_len = (uint32_t)(hl + plen);
+					frame_pad(m, f);
 					tx[nt++] = m;
 				} else {
 					/* 同一批收到的、同一源地址的写请求，B 合并进同一个响应包（VC2 每包 ≤ 16），不额外等待。
