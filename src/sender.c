@@ -63,6 +63,7 @@ static inline uint32_t id_resolve(const struct flow_ctx *c, uint32_t id)
 static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_stat *s)
 {
 	struct rte_mbuf *tx[MAX_BURST];
+	if (g_cfg.gap_cyc && rte_rdtsc() < L->next_tx) return 0;   /* --gap-us：没到时间不发 */
 	const int pack = req_pack(c->read), beats = g_cfg.beats;
 	const bool rd = c->read;
 	const uint16_t hl = hdr_len(), len = c->req_len, txn_len = axi_req_txn_len(rd, beats);
@@ -93,7 +94,9 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 	}
 	if (g_cfg.count && (uint64_t)n > g_cfg.count - s->tx_pkts) n = (int)(g_cfg.count - s->tx_pkts);   /* --count：发满为止 */
 	if (n <= 0) return 0;                        /* 窗口满或 ID 被占：不计 busy，也不读 TSC */
+	if (g_cfg.gap_cyc) n = 1;
 	uint64_t t_s = rte_rdtsc();
+	if (g_cfg.gap_cyc) L->next_tx = t_s + g_cfg.gap_cyc;
 	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
 
 	const uint32_t uport = g_cfg.e100c_port[c->port];

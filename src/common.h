@@ -70,6 +70,8 @@ struct config {
 	int    vid;                  /* 802.1Q VID（eth 与 sue 均使用） */
 	uint32_t timeout_us;         /* sender：事务超时回收（0 = 不回收） */
 	uint64_t tmo_cyc;            /* 同上，TSC 周期 */
+	uint32_t gap_us;             /* sender：调试用，每隔 N 微秒最多发 1 个请求包（0 = 不限速） */
+	uint64_t gap_cyc;            /* 同上，TSC 周期 */
 	int    rpack;                /* sender：读请求每包事务数（0 = 同 --pack） */
 	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
 	bool   hwts;                 /* 开接收硬件时间戳，统计接收时延（网卡收到 → CPU 拿到） */
@@ -140,6 +142,7 @@ struct tx_lane {
 	uint32_t idq_tail __rte_cache_aligned;        /* TX 侧写：空闲环消费位置 */
 	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID（--id-seq，只用于单发送核） */
 	uint64_t tx_txn;                      /* TX 侧写：累计发出事务数 */
+	uint64_t next_tx;                     /* TX 侧写：--gap-us 下一次允许发送的 TSC */
 	uint16_t txq;                         /* 发送队列号（初始化后只读） */
 } __rte_cache_aligned;
 
