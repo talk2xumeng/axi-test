@@ -72,7 +72,7 @@ static void usage(void)
 	"  --time SEC               测试时长；0 表示直到 Ctrl-C [0]\n"
 	"\n"
 	"发送端：窗口、报文和 CPU\n"
-	"  --window N               每个读 / 写上下文在途事务数，1~511 [511]\n"
+	"  --window N               每个读 / 写上下文在途事务数，1~511 [511]；--ethertype 可到 flows × window ≤ 1024（线上 ID 复用）\n"
 	"  --pack N                 每请求包事务数 [2]\n"
 	"                            写要求 pack×beats≤8；读最多 4 个事务\n"
 	"  --rpack N                单独设置读请求每包事务数，1~4 [跟随 --pack]\n"
@@ -259,8 +259,8 @@ static void parse_args(int argc, char **argv)
 		default: usage(); exit(1);
 		}
 	}
-	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || g_cfg.mix || (g_cfg.fpp & (g_cfg.fpp - 1)) || g_cfg.fpp * g_cfg.window > 512)) {
-		printf("--ethertype 的 sender 只支持单写 / 单读，--flows 须为 2 的幂，且 flows × window ≤ 512（各流共用 E100c 的 ID）\n");
+	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || g_cfg.mix || (g_cfg.fpp & (g_cfg.fpp - 1)) || g_cfg.fpp * g_cfg.window > ID_SPACE)) {
+		printf("--ethertype 的 sender 只支持单写 / 单读，--flows 须为 2 的幂，且 flows × window ≤ %d（超过 512 时线上 ID 复用）\n", ID_SPACE);
 		exit(1);
 	}
 	if (g_cfg.count && (!g_cfg.sender || g_cfg.tx_cores > 1)) { printf("--count 只用于 sender，且不能与 --tx-cores > 1 同用\n"); exit(1); }
@@ -279,7 +279,7 @@ static void parse_args(int argc, char **argv)
 #endif
 		g_cfg.fpp = n;                               /* N 个上下文：各一个接收 / 发送队列、一个核，共用网卡 MAC */
 	}
-	if (g_cfg.fpp < 1 || g_cfg.fpp > MAX_FPP || g_cfg.window < 1 || g_cfg.window > 511 ||
+	if (g_cfg.fpp < 1 || g_cfg.fpp > MAX_FPP || g_cfg.window < 1 || g_cfg.window > (g_cfg.ethertype && g_cfg.sender && g_cfg.tx_cores == 1 && !g_cfg.id_seq ? 1023 : 511) ||
 	    g_cfg.beats < 1 || g_cfg.beats > 4 || g_cfg.burst < 1 || g_cfg.burst > MAX_BURST || g_cfg.pack < 1 ||
 	    ((!g_cfg.read || g_cfg.mix || g_cfg.rw) && g_cfg.pack * g_cfg.beats > MAX_BEATS) || ((g_cfg.read || g_cfg.mix || g_cfg.rw) && req_pack(true) > 4) || g_cfg.rpack < 0) {
 		printf("参数越界：flows 1~%d，window 1~511，beats 1~4，burst 1~%d，写 pack×beats≤8，读 pack≤4\n", MAX_FPP, MAX_BURST);

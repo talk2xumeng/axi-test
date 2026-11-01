@@ -18,7 +18,8 @@
 #define MAX_PORTS   8
 #define MAX_FLOWS   32          /* 所有端口合计流数上限 */
 #define MAX_FPP     16          /* 每端口流数上限 */
-#define ID_SPACE    512
+#define ID_SPACE    1024        /* 逻辑 ID；线上 AXI ID 只有 9 位，低 9 位相同的两个逻辑 ID 可同时在途（E100c 单流窗口 > 512） */
+#define WIRE_IDS    512
 #define NB_RXD      1024
 #define NB_TXD      1024
 #define RX_POOL_N   16383
@@ -132,7 +133,7 @@ struct tx_lane {
 	struct port_stat st;                  /* 本发送核写 */
 	/*
 	 * 空闲 ID 池（默认）：RX 侧把完成的 ID 写入所属发送核的环 idq 并推进 idq_head，该发送核从 idq_tail 取。
-	 * 每个环里的 ID 总数 ≤ --window ≤ 511 < 环长 512，生产者不会追上消费者，TX 侧不用发布 tail。
+	 * 每个环里的 ID 总数 ≤ --window ≤ 1023 < 环长 1024，生产者不会追上消费者，TX 侧不用发布 tail。
 	 */
 	uint16_t idq[ID_SPACE] __rte_cache_aligned;   /* RX 侧写 */
 	uint32_t idq_head __rte_cache_aligned;        /* RX 侧写：空闲环生产位置（release 发布） */

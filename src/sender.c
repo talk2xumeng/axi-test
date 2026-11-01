@@ -49,6 +49,16 @@ static inline int div_pack(int x, int pack)
 	}
 }
 
+/* 响应只带线上 9 位 ID：对应的两个逻辑 ID 都在途时，算到先发出的那个上 */
+static inline uint32_t id_resolve(const struct flow_ctx *c, uint32_t id)
+{
+	const uint32_t hi = id + WIRE_IDS;
+	if (id < WIRE_IDS && __atomic_load_n(&c->outst[hi], __ATOMIC_ACQUIRE) &&
+	    (!__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE) || (int64_t)(c->ts[hi] - c->ts[id]) < 0))
+		return hi;
+	return id;
+}
+
 /* 发一批请求：受窗口与 ID 占用约束。返回发出的包数 */
 static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_stat *s)
 {
@@ -95,8 +105,8 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 			uint32_t id;
 			if (seq) { id = next_id; next_id = (id + 1) & (ID_SPACE - 1); }
 			else id = L->idq[tail++ & (ID_SPACE - 1)];
-			axi_req_set(p, rd, id, beats, uport, tsn++);
-			if (k == 0 && g_cfg.req_tag) put_be16(rte_pktmbuf_mtod(tx[i], uint8_t *) + 6, (uint16_t)id);   /* --req-tag：OISA tag_id = AXI ID */			c->ts[id] = now;
+			axi_req_set(p, rd, id & (WIRE_IDS - 1), beats, uport, tsn++);
+			if (k == 0 && g_cfg.req_tag) put_be16(rte_pktmbuf_mtod(tx[i], uint8_t *) + 6, (uint16_t)(id & (WIRE_IDS - 1)));   /* --req-tag：OISA tag_id = AXI ID */			c->ts[id] = now;
 			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
 		}
 		tx[i]->data_len = tx[i]->pkt_len = len;
@@ -139,7 +149,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 	for (uint16_t k = 0; k < ntx; k++) head[k] = c->lane[k].idq_head;
 	for (unsigned x = 0; x < nx; x++) {
 		const uint64_t v = (uint64_t)(uintptr_t)xfer[x];
-		const uint32_t id = (uint32_t)(v & 0xFFFF);
+		const uint32_t id = id_resolve(c, (uint32_t)(v & 0xFFFF));
 		if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }
 		hist_add(s, now - c->ts[id]);
 		__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
@@ -180,6 +190,7 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 				if (rte_ring_mp_enqueue(t->xq, (void *)(uintptr_t)(id | ((uint64_t)data[j] << 16))) != 0) s->err++;
 				continue;
 			}
+			id = id_resolve(c, id);
 			if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }   /* 重复 / 超时回收后迟到 */
 			hist_add(s, now - c->ts[id]);        /* 清零前读：清零后 TX 可能立即复用并改写 ts */
 			__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
