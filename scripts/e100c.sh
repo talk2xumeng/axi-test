@@ -1,8 +1,8 @@
 #!/bin/bash
 # axiperf 单机两口测试：一个口发送、一个口反射，两个进程开两个窗口。每条 axiperf 命令执行前完整打印。
 #
-#   ./scripts/e100c.sh <id> setup                 准备环境（重启后要重做）
-#   ./scripts/e100c.sh <id> check                 看链路、TC、pause、大页
+#   ./scripts/e100c.sh setup                      准备所有对口的环境（重启后要重做）
+#   ./scripts/e100c.sh check                      看所有对口的链路、TC、pause、大页
 #   ./scripts/e100c.sh <id> refl [rw] [选项]      窗口 1：反射端（单写 / 单读不带 rw，读写并发带 rw）
 #   ./scripts/e100c.sh <id> ping [选项]           窗口 2：低速打通（每流在途 4，每包 1 事务 2 拍，打印前 8 帧）
 #   ./scripts/e100c.sh <id> snd write|read|rw W [选项]  窗口 2：跑测试，每流在途 W
@@ -37,9 +37,9 @@
 #   调试读响应的填法：--r-len-data  --r-pack-beats  --r-user X  --r-split N
 #   全部参数看 ./axiperf --help
 #
-# 先准备环境（主机重启后做一次，每个 id 各一次）：
-#   ./scripts/e100c.sh 1 setup
-#   ./scripts/e100c.sh 1 check
+# 先准备环境（主机重启后做一次）：
+#   ./scripts/e100c.sh setup
+#   ./scripts/e100c.sh check
 #
 # 写，单对口，性能配置（窗口 1 跑反射端，窗口 2 跑发送端，下同）：
 #   ./scripts/e100c.sh 1 refl
@@ -89,6 +89,7 @@ usage() { sed -n '2,/^# 改环境时/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; 
 ID=$1; [ $# -gt 0 ] && shift
 case "$ID" in
 ""|-h|--help|help) usage; exit 0 ;;
+setup|check) for i in 0 1 2 3; do "$0" "$i" "$ID" || exit; done; exit 0 ;;
 0|e100c_b)  # die1 chip0 → die0 chip2
 	PAIR=e100c_b
 	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
@@ -205,6 +206,7 @@ sender() {
 case "$cmd" in
 setup)
 	for i in $SND_IF $REFL_IF; do
+		[ -e "/sys/class/net/$i" ] || { echo "跳过 $i：接口不存在"; continue; }
 		if [ "$PAIR" != direct ]; then   # 内核的 mDNS / DHCP / IPv6 帧也会进 E100c，被当成请求，先让测试口静默（重启后恢复）
 			run sudo nmcli device set "$i" managed no
 			run sudo sysctl -q "net.ipv6.conf.$i.disable_ipv6=1"
@@ -220,7 +222,8 @@ setup)
 	;;
 check)
 	for i in $SND_IF $REFL_IF; do
-		echo "== $i  MAC $(cat /sys/class/net/$i/address)  carrier $(cat /sys/class/net/$i/carrier 2>/dev/null)  $(cat /sys/class/net/$i/speed 2>/dev/null) Mb/s  NUMA $(cat /sys/class/net/$i/device/numa_node)  $(basename "$(readlink /sys/class/net/$i/device)")"
+		[ -e "/sys/class/net/$i" ] || { echo "== $i  接口不存在"; continue; }
+		echo "== $i MAC $(cat /sys/class/net/$i/address)  carrier $(cat /sys/class/net/$i/carrier 2>/dev/null)  $(cat /sys/class/net/$i/speed 2>/dev/null) Mb/s  NUMA $(cat /sys/class/net/$i/device/numa_node)  $(basename "$(readlink /sys/class/net/$i/device)")"
 		echo "   TC 数 $(sudo mlnx_qos -i "$i" | grep -c '^tc:')；pause $(sudo ethtool -a "$i" | awk '/^RX:|^TX:/{printf "%s %s ", $1, $2}')"
 	done
 	echo "大页（2MB）：node0 $(cat /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages)  node1 $(cat /sys/devices/system/node/node1/hugepages/hugepages-2048kB/nr_hugepages)"
