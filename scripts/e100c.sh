@@ -20,14 +20,17 @@
 #   direct   ens102np0 发送 → 直连 → ens110np0 反射
 #
 # 选项（可放在命令后任意位置，其余参数原样传给 axiperf）：
-#   -f N     发送端每上下文的流数，N 为 2 的幂 [snd 4，ping 1，--sue 1]
+#   -f N     发送端流数，N 为 2 的幂 [snd 4，ping 1，--sue 1]。mix 时是读写合计：偶数号流写、奇数号流读，-f 8 即 4 流写 + 4 流读
 #   -t SEC   运行秒数 [snd 20，ping 5，ping 带 -n 时 3；0 = 一直跑]
 #   -n N     ping 只发 N 帧（1~511）
-#   -r N     反射端核数：1 = 单队列单核，响应严格按收到的顺序发出 [4]
+#   -r N     反射端核数 1、2、4、8、16 [4]。1 = 单队列单核，响应严格按收到的顺序发出。
+#            读写混跑时 8 核比 4 核高约 16%（110G → 128G）；16 核反而更低。只读、只写 4 核和 8 核相同。
+#            已知问题：id 0、id 2 同时用 -r 8 时两对都掉到约 3G（原因未查），NUMA0 上最多一对用 -r 8
 #   -s       接收核不与发送核共用物理核（读的性能配置要加）
 #   -v       完整输出（每流结果、MAC、ign、xmac、pcpx）；默认精简输出
 #   --txc N  发送端每上下文 N 个发送核 [1]
 #   --sue    发送端改用 SUEv1-标准ETH 头（事务头在第 20 字节；反射端只有单流，本端 GPU ID 取 SUE_DST）
+#   --iso    发送端、反射端都加 --isolate：同一网口可同时跑本方向的发送端和反方向的反射端（双向打流）；反射端多核按请求 tag 低位分队列
 #
 # 常用的 axiperf 参数（直接加在命令后面）：
 #   发送端：--beats N  每事务拍数      --pack N  写每帧事务数      --rpack N  读每帧事务数（最多 4）
@@ -71,18 +74,39 @@
 #   ./scripts/e100c.sh 1 refl -r 1 -v --pcap /tmp/r.pcap --pcap-count 4000
 #   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 14 --rpack 1 --beats 4 --count 80 --gap-us 100000 --id-seq --pcap /tmp/s.pcap --pcap-count 4000
 #
+# 四对口并发（各对口的反射端都起来后再起发送端；反射端用默认 4 核）：
+#   for i in 0 1 2 3; do ./scripts/e100c.sh $i refl --time 50 & done; sleep 6
+#   写 4 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd write 200 -s -t 30 --pack 2 --beats 4 --id-seq & done; wait
+#   读 4 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 2 --beats 4 --id-seq & done; wait
+#   读 1 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq & done; wait
+#   读写混跑：for i in 0 1 2 3; do ./scripts/e100c.sh $i snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq & done; wait
+#   约 390G（每对约 100G）。4 对口时不要用 -r 8：id 0、id 2 同时用 8 核会掉到约 3G
 #
-# 三对口并发写（各对口的反射端都起来后再起发送端）：
-#   for i in 0 1 2; do ./scripts/e100c.sh $i refl --time 40 & done; sleep 5
-#   for i in 0 1 2; do ./scripts/e100c.sh $i snd write 200 -t 30 --pack 2 --beats 4 & done; wait
+# 测试方法：
+#   - 单对口每次只改一个变量（拍数、每帧事务数、流数、窗口、反射端核数），其他保持“4 流 × 200，-s，--id-seq”。
+#   - 看吞吐时同时看 p50：在途翻倍时延也翻倍、吞吐不变，说明是在前面排队，加窗口和流数没用。
+#   - 反射端的 busy% 会低估负载（显示 70% 时可能已是瓶颈），判断是否 CPU 瓶颈要加核对比，不要只看 busy%。
+#   - 慢速抓包用 -f 1 -r 1 --gap-us 100000，避免 E100c 拼包；拼包时按帧数推算会出错。
+#   - 停反射端只发一次 Ctrl-C；连按两次会强制退出，抓包文件写不完整。
+#   - 日志和抓包放 /home/mx/mengx，不要放 /tmp（主机重启会清空）。
+#   - 每次测完看 err、lost 和网口计数（cnt）：都为 0 才算有效。
 #
-# 三对口并发读 1 拍：
-#   for i in 0 1 2; do ./scripts/e100c.sh $i refl --time 40 & done; sleep 5
-#   for i in 0 1 2; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq & done; wait
+# 读写组合扫描（单口逐对 + 四口并发，每组 30 秒约 1 小时 50 分；中断后重跑同一命令会续跑，结果在 summary.csv）：
+#   setsid nohup ./scripts/e100c_matrix.sh /home/mx/mengx/axi_pcap/matrix 30 > /home/mx/mengx/axi_pcap/matrix.out 2>&1 < /dev/null &
 #
-# 读写并发，单对口，4 拍（2 流写、2 流读）：
+# 读写并发，单对口，4 拍，2 流写 + 2 流读（读写各 400 在途）：
 #   ./scripts/e100c.sh 1 refl
 #   ./scripts/e100c.sh 1 snd mix 200 -s -t 30 --pack 2 --rpack 1 --beats 4 --id-seq
+#
+# 读写并发，单对口，4 拍，4 流写 + 4 流读（读写各 800 在途，和单独只读、只写的资源相同；反射端 8 核约 128G，4 核约 110G）：
+#   ./scripts/e100c.sh 1 refl -r 8
+#   ./scripts/e100c.sh 1 snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq
+#
+# 双向打写：ens106 → ens101（id 2）和 ens101 → ens106（e100c_r）同时跑，4 个进程分开窗口（每方向约 100G，合计约 200G；e100c_r 借用 id 0 的核）：
+#   ./scripts/e100c.sh 2 refl --iso -r 8
+#   ./scripts/e100c.sh e100c_r refl --iso -r 8
+#   ./scripts/e100c.sh 2 snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
+#   ./scripts/e100c.sh e100c_r snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
 #
 # 看网卡计数（另开窗口）：
 #   ./scripts/e100c.sh 1 cnt snd
@@ -105,34 +129,34 @@ ID=$1; [ $# -gt 0 ] && shift
 case "$ID" in
 ""|-h|--help|help) usage; exit 0 ;;
 setup|check) for i in 0 1 2 3; do "$0" "$i" "$ID" || exit; done; exit 0 ;;
-0|e100c_b)  # die1 chip0 → die0 chip2
+0|e100c_b)  # die1 chip0 → die0 chip2；NUMA0：发送 27~43，反射 44~52
 	PAIR=e100c_b
-	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
-	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=53 REFL_C0=49
+	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=27  SND_TX=28  SND_RX=156
+	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=44 REFL_C0=45
 	E100C_MAC=$E100C_MAC1 E100C_PORT=0
 	;;
-1|e100c_d)  # die1 chip1 → die0 chip3；两口都在 NUMA1
+1|e100c_d)  # die1 chip1 → die0 chip3；NUMA1：发送 65~81，反射 82~90
 	PAIR=e100c_d
-	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=72  SND_TX=73  SND_RX=201
-	REFL_IF=ens111np0 REFL_BDF=0000:dd:00.0 REFL_MAIN=88 REFL_C0=89
+	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens111np0 REFL_BDF=0000:dd:00.0 REFL_MAIN=82 REFL_C0=83
 	E100C_MAC=$E100C_MAC1 E100C_PORT=1
 	;;
-2|e100c)   # 两口都在 NUMA0
+2|e100c)   # die1 chip2 → die0 chip0；NUMA0：发送 1~17，反射 18~26
 	PAIR=e100c
-	SND_IF=ens106np0  SND_BDF=0000:71:00.0  SND_MAIN=8   SND_TX=9   SND_RX=137
-	REFL_IF=ens101np0 REFL_BDF=0000:60:00.0 REFL_MAIN=24 REFL_C0=25
+	SND_IF=ens106np0  SND_BDF=0000:71:00.0  SND_MAIN=1   SND_TX=2   SND_RX=130
+	REFL_IF=ens101np0 REFL_BDF=0000:60:00.0 REFL_MAIN=18 REFL_C0=19
 	E100C_MAC=$E100C_MAC1 E100C_PORT=2
 	;;
-3|e100c_c)  # die1 chip3 → die0 chip1；两口都在 NUMA1；发送核 97 起，避开 id 1 加 -s 时用的 73~80
+3|e100c_c)  # die1 chip3 → die0 chip1；NUMA1：发送 91~107，反射 108~116
 	PAIR=e100c_c
-	SND_IF=ens114np0  SND_BDF=0000:e0:00.0  SND_MAIN=96  SND_TX=97  SND_RX=225
-	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=105 REFL_C0=106
+	SND_IF=ens114np0  SND_BDF=0000:e0:00.0  SND_MAIN=91  SND_TX=92  SND_RX=220
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
 	E100C_MAC=$E100C_MAC1 E100C_PORT=3
 	;;
-e100c_r)  # id 2 的反方向：两口都在 NUMA0
+e100c_r)  # id 2 的反方向，NUMA0：借用 id 0 的核（发送 27~43，反射 44~52），不能和 id 0 同时跑；可与 id 2 同时跑（双向打流加 --iso）
 	PAIR=e100c_r
-	SND_IF=ens101np0  SND_BDF=0000:60:00.0  SND_MAIN=24  SND_TX=25  SND_RX=153
-	REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=8  REFL_C0=9
+	SND_IF=ens101np0  SND_BDF=0000:60:00.0  SND_MAIN=27  SND_TX=28  SND_RX=156
+	REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=44 REFL_C0=45
 	E100C_MAC=$E100C_MAC1 E100C_PORT=0 B_PORT=2
 	;;
 e100c2)  # 两口都在 NUMA1
@@ -152,7 +176,7 @@ esac
 cmd=$1; [ $# -gt 0 ] && shift
 
 # 取出脚本自己的选项，其余留给 axiperf
-FLOWS= T= COUNT= REFL_CORES=4 SEP_RX=0 BRIEF=1 TXC=1 HDR=eth rest=()
+FLOWS= T= COUNT= REFL_CORES=4 SEP_RX=0 BRIEF=1 TXC=1 HDR=eth ISO_ARG= rest=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-f) FLOWS=$2; shift 2 ;;
@@ -163,6 +187,7 @@ while [ $# -gt 0 ]; do
 	-v) BRIEF=0; shift ;;
 	--txc) TXC=$2; shift 2 ;;
 	--sue) HDR=sue; shift ;;
+	--iso) ISO_ARG=--isolate; shift ;;
 	*) rest+=("$1"); shift ;;
 	esac
 done
@@ -215,7 +240,7 @@ sender() {
 	[ "$PAIR" != direct ] && dst="$dst --smac $E100C_SMAC"
 	[ "$HDR" = sue ] && [ "$PAIR" != direct ] && { dst=; [ "$E100C_PORT" = 0 ] || dst="--e100c-port 0,$E100C_PORT"; }   # 地址由 GPU ID 决定
 	run sudo "$AXI" --file-prefix "axisnd_$PAIR" --huge-unlink --lcores "$lc" -a "$SND_BDF,$SND_DA" -- \
-		--mode sender --vid "$VID" --flows $FLOWS --burst 16 --window "$w" --time "$t" $dst --one-dmac $NOLEN_ARG $TMO_ARG --op "$op" $rp "$@"
+		--mode sender --vid "$VID" --flows $FLOWS --burst 16 --window "$w" --time "$t" $dst --one-dmac $NOLEN_ARG $TMO_ARG --op "$op" $rp $ISO_ARG "$@"
 }
 
 case "$cmd" in
@@ -251,14 +276,21 @@ refl)
 			--mode reflector --vid "$VID" --flows 1 --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG --gpu-id "$SUE_DST" "$@"
 		exit
 	fi
+	case "$REFL_CORES" in 1|2|4|8|16) ;; *) echo "-r 只能是 1、2、4、8、16" >&2; exit 1 ;; esac
 	if [ "$REFL_CORES" = 1 ]; then   # 单队列单核：响应严格按收到的顺序发出
 		run sudo "$AXI" --file-prefix "axirefl_$PAIR" --huge-unlink -l "$REFL_MAIN,$REFL_C0" -a "$REFL_BDF,$SND_DA" -- \
-			--mode reflector --vid "$VID" --flows 1 --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG $BPORT_ARG $BRIEF_ARG "$@"
+			--mode reflector --vid "$VID" --flows 1 --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG $BPORT_ARG $BRIEF_ARG $ISO_ARG "$@"
 		exit
 	fi
-	split=4; rw=
-	if [ "$1" = rw ]; then split=2; rw="--op rw"; shift; fi
-	run sudo "$AXI" --file-prefix "axirefl_$PAIR" --huge-unlink -l "$REFL_MAIN,$REFL_C0-$((REFL_C0 + 3))" -a "$REFL_BDF,$REFL_DA" -- \
+	cores="$REFL_MAIN,$REFL_C0-$((REFL_C0 + REFL_CORES - 1))"
+	if [ -n "$ISO_ARG" ]; then   # --iso 多核：不用 --rx-split，按请求 tag 低位分到 N 个队列
+		run sudo "$AXI" --file-prefix "axirefl_$PAIR" --huge-unlink -l "$cores" -a "$REFL_BDF,$SND_DA" -- \
+			--mode reflector --vid "$VID" --flows $REFL_CORES --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG $BPORT_ARG $BRIEF_ARG $ISO_ARG "$@"
+		exit
+	fi
+	split=$REFL_CORES; rw=
+	if [ "$1" = rw ]; then split=$((REFL_CORES / 2)); rw="--op rw"; shift; fi
+	run sudo "$AXI" --file-prefix "axirefl_$PAIR" --huge-unlink -l "$cores" -a "$REFL_BDF,$REFL_DA" -- \
 		--mode reflector --vid "$VID" --rx-split $split $rw --rxd 4096 --burst 16 --b-pack 16 $NOLEN_ARG $BPORT_ARG $BRIEF_ARG "$@"
 	;;
 ping)

@@ -116,6 +116,39 @@ static int steer_tag(uint16_t pi, uint16_t q, uint16_t nq, uint8_t src_base)
 	return -1;
 }
 
+/*
+ * --isolate：同一网口上 sender、reflector 各一个进程（双向打流），各自只收自己那类帧。
+ * OISA 第 0 字节 bit 3：请求（c0 / c4）为 0，响应（c8 / cc）为 1；sender 多流时再按 dest id 低位分队列。
+ */
+static int steer_role(uint16_t pi, uint16_t q, uint16_t nq, uint8_t src_base)
+{
+	struct rte_flow_attr attr = { .ingress = 1 };
+	struct rte_flow_item_eth spec, mask;
+	memset(&spec, 0, sizeof(spec)); memset(&mask, 0, sizeof(mask));
+	spec.hdr.dst_addr.addr_bytes[0] = g_cfg.sender ? 0x08 : 0x00;
+	mask.hdr.dst_addr.addr_bytes[0] = 0x08;
+	if (g_cfg.sender && nq > 1) {
+		spec.hdr.src_addr.addr_bytes[3] = (uint8_t)((src_base + q) & (nq - 1));
+		mask.hdr.src_addr.addr_bytes[3] = (uint8_t)(nq - 1);
+	} else if (!g_cfg.sender && nq > 1) {        /* reflector 多队列：按请求 tag_id（E100c 填转发后的 AXI ID）低位分，第 7 字节 = src addr_bytes[1] */
+		spec.hdr.src_addr.addr_bytes[1] = (uint8_t)(q & (nq - 1));
+		mask.hdr.src_addr.addr_bytes[1] = (uint8_t)(nq - 1);
+	}
+	spec.hdr.ether_type = rte_cpu_to_be_16(g_cfg.ethertype);
+	mask.hdr.ether_type = RTE_BE16(0xFFFF);
+	struct rte_flow_item pat[] = {
+		{ .type = RTE_FLOW_ITEM_TYPE_ETH, .spec = &spec, .mask = &mask },
+		{ .type = RTE_FLOW_ITEM_TYPE_END } };
+	struct rte_flow_action_queue qa = { .index = q };
+	struct rte_flow_action act[] = {
+		{ .type = RTE_FLOW_ACTION_TYPE_QUEUE, .conf = &qa },
+		{ .type = RTE_FLOW_ACTION_TYPE_END } };
+	struct rte_flow_error err;
+	if (rte_flow_create(pi, &attr, pat, act, &err)) return 0;
+	printf("警告：port %u --isolate 导流到 queue %u 失败（%s）\n", pi, q, err.message ? err.message : "?");
+	return -1;
+}
+
 /* ---------------- --rx-split：同一对 MAC 按随机值均分到 N 个接收队列（mlx5 HW steering，模板 / 异步 API） ----------------
  *
  * 经 E100c 后反射端只看到一对 MAC、一个 VID，按地址导流只能进一个队列、一个核。
@@ -385,6 +418,11 @@ void port_init(uint16_t pi)
 		conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
 	}
 	const uint16_t ntx = (uint16_t)tx_lanes(), ntq = (uint16_t)(nq * ntx);   /* 发送队列数：每个上下文 ntx 个（每个发送核一个） */
+	if (g_cfg.isolate) {                         /* 只收 rte_flow 规则匹配的帧，同口另一进程的帧不进来 */
+		struct rte_flow_error e;
+		if (rte_flow_isolate(pi, 1, &e) != 0)
+			rte_exit(EXIT_FAILURE, "port %u：rte_flow_isolate 失败（%s）\n", pi, e.message ? e.message : "?");
+	}
 	if (rte_eth_dev_configure(pi, nq, ntq, &conf) < 0 ||
 	    rte_eth_dev_adjust_nb_rx_tx_desc(pi, &nrxd, &ntxd) < 0)
 		rte_exit(EXIT_FAILURE, "port %u configure failed\n", pi);
@@ -450,9 +488,11 @@ void port_init(uint16_t pi)
 		    rte_eth_dev_mac_addr_add(pi, (struct rte_ether_addr *)a, 0) < 0)
 			printf("提示：port %u 添加 MAC 过滤 %u 失败，依赖导流规则\n", pi, c->flow);
 		int pcp = m == 1 ? -1 : g_cfg.sender ? (c->read ? VC_R : VC_B) : (c->read ? VC_AR : VC_AW);
-		if (g_cfg.ethertype && g_cfg.sender) { if (nq > 1) bad |= steer_tag(pi, q, nq, a->addr_bytes[5]); }
+		if (g_cfg.isolate) bad |= steer_role(pi, q, nq, a->addr_bytes[5]);
+		else if (g_cfg.ethertype && g_cfg.sender) { if (nq > 1) bad |= steer_tag(pi, q, nq, a->addr_bytes[5]); }
 		else bad |= steer_flow(pi, a, pcp, q);
 	}
+	if (bad && g_cfg.isolate) rte_exit(EXIT_FAILURE, "--isolate 的导流规则建立失败，收不到帧\n");
 	if (bad && m == 2) rte_exit(EXIT_FAILURE, "rw 需要按 PCP 导流，规则建立失败\n");
 	if (g_cfg.promisc || g_cfg.hdr == HDR_SUE || bad || g_cfg.ethertype) {
 		rte_eth_promiscuous_enable(pi);

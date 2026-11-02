@@ -129,6 +129,8 @@ static void usage(void)
 	"                            （awuser[51:49] / aruser[48:46]；未设为 0）。user.tsn 总是填：每端口写、读各一个计数，\n"
 	"                            每个请求事务一个，从 0 递增、16 bit 循环（awuser[48:33] / aruser[45:30]）\n"
 	"  --promisc                强制混杂接收 [默认仅接收本端各流 MAC]\n"
+	"  --isolate                --ethertype 时：rte_flow 隔离模式，sender 只收响应、reflector 只收请求，\n"
+	"                            同一网口可同时跑 sender、reflector 两个进程（双向打流）；reflector 多核用 --flows N（按请求 tag 低位分队列），不用 --rx-split\n"
 	"\n"
 	"诊断与抓包（性能对比时建议关闭）\n"
 	"  --hwts                   开启 RX 硬件时间戳，统计网卡接收→CPU取包时延\n"
@@ -166,7 +168,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_ISOLATE, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -175,7 +177,7 @@ static void parse_args(int argc, char **argv)
 {
 	static const struct option lo[] = {
 		{"mode", 1, 0, OPT_MODE}, {"op", 1, 0, OPT_OP}, {"window", 1, 0, OPT_WINDOW}, {"pack", 1, 0, OPT_PACK},
-		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-echo-aruser", 1, 0, OPT_RECHO}, {"ar-user-low", 1, 0, OPT_ARUSERLOW}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
+		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-echo-aruser", 1, 0, OPT_RECHO}, {"ar-user-low", 1, 0, OPT_ARUSERLOW}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT}, {"isolate", 0, 0, OPT_ISOLATE},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
 		{"vid", 1, 0, OPT_VID}, {"nosplit", 0, 0, OPT_NOSPLIT}, {"dump", 1, 0, OPT_DUMP}, {"flows", 1, 0, OPT_FLOWS},
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
@@ -232,6 +234,7 @@ static void parse_args(int argc, char **argv)
 		case OPT_VID:     g_cfg.vid = (int)num(optarg) & 0xFFF; break;
 		case OPT_NOSPLIT: g_cfg.split = false; break;
 		case OPT_PROMISC: g_cfg.promisc = true; break;
+		case OPT_ISOLATE: g_cfg.isolate = true; break;
 		case OPT_ONEDMAC: g_cfg.one_dmac = true; break;
 		case OPT_RXSPLIT: g_cfg.rx_split = (int)num(optarg); break;
 		case OPT_RXD:     g_cfg.rxd = (int)num(optarg); break;
@@ -279,13 +282,19 @@ static void parse_args(int argc, char **argv)
 		default: usage(); exit(1);
 		}
 	}
-	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || (g_cfg.fpp & (g_cfg.fpp - 1)) || g_cfg.fpp * g_cfg.window > ID_SPACE)) {
-		printf("--ethertype 的 sender 不支持 rw（读写并发用 mix：偶数流写、奇数流读），--flows 须为 2 的幂，且 flows × window ≤ %d（超过 512 时线上 ID 复用）\n", ID_SPACE);
+	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || (g_cfg.fpp & (g_cfg.fpp - 1)) || (g_cfg.mix && g_cfg.fpp < 2) ||
+	                                        (g_cfg.mix ? g_cfg.fpp / 2 : g_cfg.fpp) * g_cfg.window > ID_SPACE)) {
+		printf("--ethertype 的 sender 不支持 rw（读写并发用 mix：偶数流写、奇数流读，读写各一套 ID），--flows 须为 2 的幂（mix 至少 2），"
+		       "且 flows × window ≤ %d（mix 为 flows/2 × window；超过 512 时线上 ID 复用）\n", ID_SPACE);
 		exit(1);
 	}
 	/* aruser[27:20] sect_mask（64B 总线）= {N{2'b11}} << {araddr[7:6], 1'b0}；地址固定为 0，不移位 */
 	if (g_cfg.ethertype && g_cfg.sender && !g_cfg.has_ar_user_low && g_cfg.beats >= 1 && g_cfg.beats <= 4)
 		g_cfg.ar_user_low = ((1u << (2 * g_cfg.beats)) - 1) << 20;
+	if (g_cfg.isolate && (!g_cfg.ethertype || g_cfg.rx_split || (g_cfg.fpp & (g_cfg.fpp - 1)))) {
+		printf("--isolate 只用于 --ethertype，不能与 --rx-split 同用（reflector 多核用 --flows N，按请求 tag 低位分队列），--flows 须为 2 的幂\n");
+		exit(1);
+	}
 	if (g_cfg.count && (!g_cfg.sender || g_cfg.tx_cores > 1)) { printf("--count 只用于 sender，且不能与 --tx-cores > 1 同用\n"); exit(1); }
 	if (g_cfg.rxd < 64 || g_cfg.rxd > 32768 || (g_cfg.rxd & (g_cfg.rxd - 1))) { printf("--rxd 须为 2 的幂、64~32768\n"); exit(1); }
 	if (g_cfg.rx_split) {
@@ -371,9 +380,7 @@ int main(int argc, char **argv)
 	for (uint16_t i = 0; i < g_nb_flows; i++) {      /* 空闲 ID 池：0 .. window-1 按连续段均分给各发送核 */
 		struct flow_ctx *c = &g_flow[i];
 		const int W = g_cfg.window, N = c->ntx;
-		/* E100c：各流共用 ID 空间，响应按 tag（= ID）低位导流，所以流 f 用 ID ≡ f (mod 流数) */
-		const bool shared = g_cfg.ethertype && g_cfg.sender;
-		const int step = shared ? g_cfg.fpp : 1, base = shared ? c->flow : 0;
+		const int step = (int)id_step(), base = (int)id_base(c->flow);   /* E100c 的 ID 分配见 common.h id_step() */
 		for (int k = 0; k < N; k++) {
 			struct tx_lane *L = &c->lane[k];
 			const int lo = k * W / N, hi = (k + 1) * W / N;

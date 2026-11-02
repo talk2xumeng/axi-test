@@ -84,6 +84,7 @@ struct config {
 	bool   hwts;                 /* 开接收硬件时间戳，统计接收时延（网卡收到 → CPU 拿到） */
 	int    tx_cores;             /* sender：每条流的发送核数 1~4，每核独占一个发送队列和一段 ID（默认 1） */
 	bool   promisc;
+	bool   isolate;              /* --isolate：rte_flow 隔离模式，同口 sender / reflector 各一进程，按 OISA 第 0 字节 bit 3 分请求、响应 */
 	bool   one_dmac;             /* sender：各流请求都发往 --dmac 给出的同一个地址，不按流派生 */
 	bool   brief;                /* 精简输出：所有流合并，隐藏调试列 */
 	bool   no_len;               /* eth 头不带 Length，事务头紧跟 802.1Q 标签；接收端按帧长解析（E100c 格式） */
@@ -197,6 +198,22 @@ static inline int tx_lanes(void) { return (g_cfg.sender && g_cfg.split) ? g_cfg.
 
 /* 本上下文每请求包的事务数：读用 --rpack（未设时同 --pack），写用 --pack */
 static inline int req_pack(bool read) { return (read && g_cfg.rpack) ? g_cfg.rpack : g_cfg.pack; }
+
+/*
+ * E100c sender 的 ID 分配：各流共用线上 ID 空间，响应可能被合并进别的流的队列，按 ID 低位找回所属流。
+ *   单写 / 单读：流 f 用 ID ≡ f (mod 流数)。
+ *   mix（偶数流写、奇数流读）：读、写各一套 ID 空间（AXI 的 AR、AW ID 本来独立），
+ *   流 f 用 ID ≡ f/2 (mod 流数/2)，按响应类型（B / R）和 ID 低位找回所属流。
+ * 其他情况每流独占 ID 空间：步进 1、起点 0。
+ */
+static inline bool id_shared(void) { return g_cfg.ethertype && g_cfg.sender; }
+static inline uint32_t id_step(void) { return !id_shared() ? 1 : (uint32_t)(g_cfg.mix ? g_cfg.fpp / 2 : g_cfg.fpp); }
+static inline uint32_t id_base(uint16_t flow) { return !id_shared() ? 0 : (g_cfg.mix ? flow >> 1 : flow); }
+static inline uint16_t id_owner(uint32_t id, bool read)
+{
+	const uint32_t s = id_step();
+	return g_cfg.mix ? (uint16_t)(((id & (s - 1)) << 1) | (read ? 1 : 0)) : (uint16_t)(id & (s - 1));
+}
 
 /* 线上占用：不足 60B 补齐 + FCS 4B + 前导码/SFD/IFG 20B */
 static inline uint16_t frame_wire(uint32_t len) { return (uint16_t)((len < 60 ? 60 : len) + 4 + 20); }

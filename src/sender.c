@@ -68,7 +68,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 	const bool rd = c->read;
 	const uint16_t hl = hdr_len(), len = c->req_len, txn_len = axi_req_txn_len(rd, beats);
 	const bool seq = g_cfg.id_seq;
-	const uint32_t step = g_cfg.ethertype ? (uint32_t)g_cfg.fpp : 1;   /* E100c 各流共用 ID 空间：流 f 用 ID ≡ f (mod 流数) */
+	const uint32_t step = id_step();             /* E100c 的 ID 分配见 common.h */
 	uint32_t next_id = L->next_id;               /* 局部副本，批末写回 */
 	uint32_t tail = L->idq_tail;
 	int n = 0;
@@ -187,8 +187,9 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		if (bad) { s->err++; dump_bad(s, c->port, "bad AXI payload", m); }
 		for (int j = 0; j < k; j++) {
 			uint32_t id = ids[j];
-			if (c->xq && (id & (g_cfg.fpp - 1)) != c->flow) {   /* 各流 source id 不同，这样的合并是 E100c 的错误：记错并转交销账 */
-				struct flow_ctx *t = c - c->flow + (id & (g_cfg.fpp - 1));
+			const uint16_t own = c->xq ? id_owner(id, vc == VC_R) : c->flow;
+			if (own != c->flow) {                  /* 各流 source id 不同，这样的合并是 E100c 的错误：记错并转交销账 */
+				struct flow_ctx *t = c - c->flow + own;
 				s->err++;
 				if (s->err <= 3) dump_bad(s, c->port, "E100c merged responses of different sources", m);
 				if (rte_ring_mp_enqueue(t->xq, (void *)(uintptr_t)(id | ((uint64_t)data[j] << 16))) != 0) s->err++;
