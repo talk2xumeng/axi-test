@@ -108,7 +108,7 @@ setup|check) for i in 0 1 2 3; do "$0" "$i" "$ID" || exit; done; exit 0 ;;
 0|e100c_b)  # die1 chip0 → die0 chip2
 	PAIR=e100c_b
 	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
-	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=48 REFL_C0=49
+	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=53 REFL_C0=49
 	E100C_MAC=$E100C_MAC1 E100C_PORT=0
 	;;
 1|e100c_d)  # die1 chip1 → die0 chip3；两口都在 NUMA1
