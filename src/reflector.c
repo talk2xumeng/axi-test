@@ -130,7 +130,7 @@ int reflector_loop(void *arg)
 				uint32_t beats_in = 0;
 				uint16_t cnt = 0;
 				for (int j = 0; j < k; j++) {
-					uint32_t b = beats[j];
+					uint32_t b = g_cfg.r_beats ? (uint32_t)g_cfg.r_beats : beats[j];
 					if (rm && beats_in + b > MAX_BEATS) {  /* 放不下：当前包先收尾 */
 						r_finish(rm, rp, f, cnt, hl);
 						tx[nt++] = rm; rm = NULL;

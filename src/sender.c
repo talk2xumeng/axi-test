@@ -68,6 +68,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 	const bool rd = c->read;
 	const uint16_t hl = hdr_len(), len = c->req_len, txn_len = axi_req_txn_len(rd, beats);
 	const bool seq = g_cfg.id_seq;
+	const uint32_t step = g_cfg.ethertype ? (uint32_t)g_cfg.fpp : 1;   /* E100c 各流共用 ID 空间：流 f 用 ID ≡ f (mod 流数) */
 	uint32_t next_id = L->next_id;               /* 局部副本，批末写回 */
 	uint32_t tail = L->idq_tail;
 	int n = 0;
@@ -79,7 +80,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 		for (; n < can; n++) {                   /* 接下来 pack 个 ID 均须空闲 */
 			bool ok = true;
 			for (int k = 0; k < pack; k++) {
-				uint32_t id = (next_id + n * pack + k) & (ID_SPACE - 1);
+				uint32_t id = (next_id + (uint32_t)(n * pack + k) * step) & (ID_SPACE - 1);
 				if (__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { ok = false; break; }
 			}
 			if (!ok) break;
@@ -106,7 +107,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 		uint8_t *p = rte_pktmbuf_mtod(tx[i], uint8_t *) + hl;
 		for (int k = 0; k < pack; k++, p += txn_len) {
 			uint32_t id;
-			if (seq) { id = next_id; next_id = (id + 1) & (ID_SPACE - 1); }
+			if (seq) { id = next_id; next_id = (id + step) & (ID_SPACE - 1); }
 			else id = L->idq[tail++ & (ID_SPACE - 1)];
 			axi_req_set(p, rd, id & (WIRE_IDS - 1), beats, uport, tsn++);
 			if (k == 0 && g_cfg.req_tag) put_be16(rte_pktmbuf_mtod(tx[i], uint8_t *) + 6, (uint16_t)(id & (WIRE_IDS - 1)));   /* --req-tag：OISA tag_id = AXI ID */			c->ts[id] = now;

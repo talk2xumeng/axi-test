@@ -77,7 +77,7 @@ static inline void oisa_reply(uint8_t *f, const uint8_t *req, uint8_t vc, uint16
 	const uint16_t tag = get_be16(req + 6), dest = get_be16(req + 8) & 0x3FF, src = get_be16(req + 10) & 0x3FF;
 	f[0] = (uint8_t)((6u << 5) | (vc << 2));
 	f[1] = vc == VC_B_TAG ? 0x03 : 0x44;
-	put_be16(f + 2, (uint16_t)(16 + plen));
+	put_be16(f + 2, g_cfg.r_len_data && vc != VC_B_TAG ?(uint16_t)(plen - ntxn * 4) : (uint16_t)(16 + plen));   /* 每个 R 事务 4 字节头 */
 	put_be16(f + 4, 0);
 	put_be16(f + 6, tag);
 	put_be16(f + 8, src);
