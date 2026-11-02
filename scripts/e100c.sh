@@ -13,7 +13,7 @@
 #   0  ens108np0 发送 → E100c → ens103np0 反射（die1 chip0 → die0 chip2）
 #   1  ens119np0 发送 → E100c → ens111np0 反射（die1 chip1 → die0 chip3，两口都在 NUMA1）
 #   2  ens106np0 发送 → E100c → ens101np0 反射（两口都在 NUMA0）
-#   3  ens105np0 发送 → E100c → ens110np0 反射（die1 chip3 → die0 chip1；发送端 NUMA0，反射端 NUMA1）
+#   3  ens114np0 发送 → E100c → ens110np0 反射（die1 chip3 → die0 chip1，两口都在 NUMA1）
 # 其他对口用名字代替 id：
 #   e100c_r  ens101np0 发送 → E100c → ens106np0 反射（id 2 的反方向，user.port 0，b-port 2）
 #   e100c2   ens111np0 发送 → E100c → ens119np0 反射（要先填下面的 E100C_MAC2、E100C_PORT2）
@@ -123,10 +123,10 @@ setup|check) for i in 0 1 2 3; do "$0" "$i" "$ID" || exit; done; exit 0 ;;
 	REFL_IF=ens101np0 REFL_BDF=0000:60:00.0 REFL_MAIN=24 REFL_C0=25
 	E100C_MAC=$E100C_MAC1 E100C_PORT=2
 	;;
-3|e100c_c)  # die1 chip3 → die0 chip1；发送端 NUMA0，反射端 NUMA1
+3|e100c_c)  # die1 chip3 → die0 chip1；两口都在 NUMA1；发送核 97 起，避开 id 1 加 -s 时用的 73~80
 	PAIR=e100c_c
-	SND_IF=ens105np0  SND_BDF=0000:70:00.0  SND_MAIN=56  SND_TX=57  SND_RX=185
-	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=80 REFL_C0=81
+	SND_IF=ens114np0  SND_BDF=0000:e0:00.0  SND_MAIN=96  SND_TX=97  SND_RX=225
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=105 REFL_C0=106
 	E100C_MAC=$E100C_MAC1 E100C_PORT=3
 	;;
 e100c_r)  # id 2 的反方向：两口都在 NUMA0
