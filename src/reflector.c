@@ -123,7 +123,8 @@ int reflector_loop(void *arg)
 					bn = (uint16_t)(bn + k);
 				}
 			} else if (vc == VC_AR) {
-				int k = axi_ar_parse(p, hi.plen, hi.ntxn, ids, beats, &bad);
+				uint64_t aruser[MAX_TXN];
+				int k = axi_ar_parse(p, hi.plen, hi.ntxn, ids, beats, aruser, &bad);
 				if (bad) { s->err++; dump_bad(s, c->port, "bad AXI read payload", m); }
 				struct rte_mbuf *rm = NULL;
 				uint8_t *rp = NULL;
@@ -156,7 +157,10 @@ int reflector_loop(void *arg)
 						}
 						continue;
 					}
-					put_be32(rp, axi_w0_r(ids[j], b));  /* rdata 已由模板预填 */
+					uint32_t w0 = axi_w0_r(ids[j], b);
+					if (g_cfg.r_echo >= 0)               /* --r-echo-aruser：ruser（W0[16:4]）取自请求的 aruser */
+						w0 = (w0 & ~(0x1FFFu << 4)) | ((uint32_t)((aruser[j] >> g_cfg.r_echo) & 0x1FFF) << 4);
+					put_be32(rp, w0);                    /* rdata 已由模板预填 */
 					rp += R_HDR + b * BEAT;
 					beats_in += b; cnt++;
 				}

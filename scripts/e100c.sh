@@ -5,7 +5,7 @@
 #   ./scripts/e100c.sh check                      看所有对口的链路、TC、pause、大页
 #   ./scripts/e100c.sh <id> refl [rw] [选项]      窗口 1：反射端（单写 / 单读不带 rw，读写并发带 rw）
 #   ./scripts/e100c.sh <id> ping [选项]           窗口 2：低速打通（每流在途 4，每包 1 事务 2 拍，打印前 8 帧）
-#   ./scripts/e100c.sh <id> snd write|read|rw W [选项]  窗口 2：跑测试，每流在途 W
+#   ./scripts/e100c.sh <id> snd write|read|rw|mix W [选项]  窗口 2：跑测试，每流在途 W（E100c 读写并发用 mix：偶数流写、奇数流读，拍数相同）
 #   ./scripts/e100c.sh <id> cnt snd|refl          窗口 3：每秒看网卡计数
 #   ./scripts/e100c.sh <id> cap [帧数]            抓进反射端网口的帧（先停反射端），存 /tmp/refl_in_<名字>.pcap
 #
@@ -33,8 +33,10 @@
 #   发送端：--beats N  每事务拍数      --pack N  写每帧事务数      --rpack N  读每帧事务数（最多 4）
 #           --count N  只发 N 帧       --gap-us N  每隔 N 微秒发 1 帧   --id-seq  ID 按顺序分配（读的性能更高）
 #           --dump N   打印前 N 帧     --pcap F --pcap-count N  抓包存到文件 F，最多 N 帧
-#   反射端：--r-beats N  读响应固定回 N 拍（E100c 转发后的请求看不出拍数，读测试要加，与发送端 --beats 相同）
-#   调试读响应的填法：--r-len-data  --r-pack-beats  --r-user X  --r-split N
+#           --ar-user-low X  读请求 aruser[29:0]。默认按 --beats 自动填 sect_mask（bit 27:20，地址 0 时 1~4 拍为 0x03、0x0F、0x3F、0xFF）；
+#                            填 0 可复现多拍读卡死（累计几十个响应后卡死，要给 E100c 重新上下电才能恢复）
+#   反射端：读响应拍数默认取自请求；--r-beats N  固定回 N 拍
+#   调试读响应的填法：--r-user X  --r-len-data  --r-pack-beats  --r-echo-aruser N  --r-split N
 #   全部参数看 ./axiperf --help
 #
 # 先准备环境（主机重启后做一次）：
@@ -50,24 +52,37 @@
 #   ./scripts/e100c.sh 1 ping -n 10
 #
 # 读 1 拍，单对口，性能配置：
-#   ./scripts/e100c.sh 1 refl --r-beats 1
+#   ./scripts/e100c.sh 1 refl
 #   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq
 #
 # 读 1 拍，单流慢速，发 100 帧，看每流结果并抓包：
-#   ./scripts/e100c.sh 1 refl -r 1 -v --r-beats 1 --pcap /tmp/r.pcap --pcap-count 2000
+#   ./scripts/e100c.sh 1 refl -r 1 -v --pcap /tmp/r.pcap --pcap-count 2000
 #   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 5 --rpack 1 --beats 1 --count 100 --gap-us 1000 --id-seq --pcap /tmp/s.pcap --pcap-count 2000
 #
-# 读 2 拍（注意：累计几十个响应后 E100c 会卡死，卡死后这对口的读要给 E100c 重新上下电才能恢复）：
-#   ./scripts/e100c.sh 1 refl -r 1 -v --r-beats 2
-#   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 5 --rpack 1 --beats 2 --count 500 --id-seq
+# 读 2 拍，单对口，性能配置：
+#   ./scripts/e100c.sh 1 refl
+#   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 1 --beats 2 --id-seq
+#
+# 读 4 拍，单对口，性能配置：
+#   ./scripts/e100c.sh 1 refl
+#   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 1 --beats 4 --id-seq
+#
+# 读 4 拍，单流慢速，每 100ms 发 1 帧（不会拼包），发 80 帧并抓包：
+#   ./scripts/e100c.sh 1 refl -r 1 -v --pcap /tmp/r.pcap --pcap-count 4000
+#   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 14 --rpack 1 --beats 4 --count 80 --gap-us 100000 --id-seq --pcap /tmp/s.pcap --pcap-count 4000
+#
 #
 # 三对口并发写（各对口的反射端都起来后再起发送端）：
 #   for i in 0 1 2; do ./scripts/e100c.sh $i refl --time 40 & done; sleep 5
 #   for i in 0 1 2; do ./scripts/e100c.sh $i snd write 200 -t 30 --pack 2 --beats 4 & done; wait
 #
 # 三对口并发读 1 拍：
-#   for i in 0 1 2; do ./scripts/e100c.sh $i refl --r-beats 1 --time 40 & done; sleep 5
+#   for i in 0 1 2; do ./scripts/e100c.sh $i refl --time 40 & done; sleep 5
 #   for i in 0 1 2; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq & done; wait
+#
+# 读写并发，单对口，4 拍（2 流写、2 流读）：
+#   ./scripts/e100c.sh 1 refl
+#   ./scripts/e100c.sh 1 snd mix 200 -s -t 30 --pack 2 --rpack 1 --beats 4 --id-seq
 #
 # 看网卡计数（另开窗口）：
 #   ./scripts/e100c.sh 1 cnt snd
@@ -82,7 +97,7 @@ E100C_SMAC=00:00:00:00:04:01    # 发送端 SMAC，也是 OISA 头第 6~11 字�
 E100C_MAC2=                     # e100c2：E100c 上接 ens111np0 那个口的 MAC
 E100C_PORT2=                    # e100c2：ens111np0 所接 E100c 的 ETH 口号 1~4
 SUE_DST=0xc0c0 SUE_SRC=1 SUE_ET=0x88ee SUE_FMT=0 SUE_PT=0   # --sue：目的 / 源 GPU ID、EtherType、Format、PktType
-MIN_FRAME=0 B_PORT=0 B_TAG=0 R_USER=0x80   # 反射端默认值，命令行加 --min-frame / --b-port / --b-tag / --r-user 可覆盖
+MIN_FRAME=0 B_PORT=0 B_TAG=0 R_USER=0   # 反射端默认值，命令行加 --min-frame / --b-port / --b-tag / --r-user 可覆盖
 
 usage() { sed -n '2,/^# 改环境时/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
@@ -254,8 +269,8 @@ ping)
 	;;
 snd)
 	op=$1; w=$2
-	case "$op" in write|read|rw) ;; *) echo "用法: $0 <id> snd write|read|rw <每流在途>" >&2; exit 1 ;; esac
-	[ -n "$w" ] || { echo "用法: $0 <id> snd write|read|rw <每流在途>" >&2; exit 1; }
+	case "$op" in write|read|rw|mix) ;; *) echo "用法: $0 <id> snd write|read|rw|mix <每流在途>" >&2; exit 1 ;; esac
+	[ -n "$w" ] || { echo "用法: $0 <id> snd write|read|rw|mix <每流在途>" >&2; exit 1; }
 	# 一个请求包占多个 ID（写 --pack 2，读 --rpack 4），每流在途小于它时一帧也发不出去
 	min=2; [ "$op" = write ] || min=4
 	[ "$w" -ge "$min" ] || { echo "$op 的每流在途至少为 $min，否则发不出包" >&2; exit 1; }

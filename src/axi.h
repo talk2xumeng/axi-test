@@ -55,6 +55,7 @@ static inline uint16_t axi_req_build(uint8_t *p, bool read, int pack, int beats)
 		} else {                                             /* read */
 			memset(p, 0, AR_HDR);
 			put_be32(p, axi_w0_ar(0));
+			put_be32(p + 8, (g_cfg.ar_user_low & 0x3FF) << 22);   /* --ar-user-low：aruser[9:0] = W2[31:22] */
 			put_be32(p + 12, ((uint32_t)(beats - 1) << 3) | 6); /* arlen，arsize = 110 */
 			p += AR_HDR;
 		}
@@ -89,7 +90,7 @@ static inline void axi_req_set(uint8_t *txn, bool read, uint32_t id, int beats, 
 	} else {
 		const uint64_t u = axi_user_tp(port, tsn) << AR_USER_LSB;   /* aruser[60:0] */
 		w0 = axi_w0_ar(id) | (uint32_t)(u >> 42);
-		w1 = (uint32_t)(u >> 10);
+		w1 = (uint32_t)(u >> 10) | ((g_cfg.ar_user_low >> 10) & 0xFFFFF);   /* --ar-user-low：aruser[29:10] = W1[19:0] */
 	}
 	put_be32(txn, w0);
 	put_be32(txn + 4, w1);
@@ -160,7 +161,7 @@ static inline uint16_t axi_b_build(uint8_t *p, const uint32_t *ids, int k)
 }
 
 /* 解析读请求 payload（reflector 用），输出 ids 与各自拍数 */
-static inline int axi_ar_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, uint32_t *ids, uint32_t *beats, bool *bad)
+static inline int axi_ar_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, uint32_t *ids, uint32_t *beats, uint64_t *aruser, bool *bad)
 {
 	int k = 0; uint16_t off = 0;
 	*bad = false;
@@ -169,7 +170,8 @@ static inline int axi_ar_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, u
 		if (g_cfg.no_len && w0 == 0) break;                  /* 没有 Length 时，全 0 是短帧的补齐字节 */
 		if (axi_ft(w0) != FT_AR) { *bad = true; break; }
 		ids[k] = axi_id(w0);
-		beats[k] = ((w3 >> (g_cfg.ethertype ? 10 : 3)) & 3) + 1;   /* arlen；E100c 转发时放在 W3[11:10] */
+		beats[k] = ((w3 >> (g_cfg.ethertype && (w3 & 0x400) ? 10 : 3)) & 3) + 1;   /* arlen 在 W3[4:3]；请求 sect_mask=0 时 E100c 转发成 0x0406，放在 W3[11:10]（地址全 0 时才能这样区分） */
+		aruser[k] = ((uint64_t)(w0 & 0x7FFFF) << 42) | ((uint64_t)get_be32(p + off + 4) << 10) | (get_be32(p + off + 8) >> 22);   /* aruser[60:0] = W0[18:0] + W1 + W2[31:22] */
 		k++; off += AR_HDR;
 	}
 	if (ntxn && k != ntxn) *bad = true;

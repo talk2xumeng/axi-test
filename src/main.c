@@ -36,7 +36,7 @@ struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
 	.rxd = NB_RXD, .time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
 	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1, .tx_cores = 1,
-	.req_b1 = -1, .sue_ethertype = 0x88B5,.sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
+	.req_b1 = -1, .r_echo = -1, .sue_ethertype = 0x88B5,.sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
 };
 volatile bool g_quit;
 struct flow_ctx g_flow[MAX_FLOWS];
@@ -110,6 +110,8 @@ static void usage(void)
 	"  --count N                sender：每个发送上下文发满 N 个请求包后不再发（进程仍运行到 --time 结束）；0 = 不限 [0]\n"
 	"  --gap-us N               sender：调试用，每隔 N 微秒最多发 1 个请求包；0 = 不限速 [0]\n"
 	"  --r-beats N              reflector：调试用，读响应固定回 N 拍（1~4），不看请求的 arlen；0 = 按请求 [0]\n"
+	"  --r-echo-aruser N        reflector：读响应 ruser 取自请求，ruser = (aruser >> N) & 0x1FFF（0~48）；默认用 --r-user\n"
+	"  --ar-user-low X          sender：读请求 aruser[29:0] 填 X（30 位）；--ethertype 时默认只填 sect_mask（地址 0：N 拍低 2N 位为 1），填 0 可复现多拍读卡死\n"
 	"  --r-len-data             reflector：调试用，读响应 OISA length 填数据字节数，默认填整帧长\n"
 	"  --r-pack-beats           reflector：调试用，读响应 OISA packing_num 填总拍数，默认填事务数\n"
 	"  --r-split N              reflector：调试用，读响应每拍一个 R 头（rlen=0），只有最后一拍 rlast=1；1 = 同一帧，2 = 每拍单独一帧\n"
@@ -164,7 +166,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RPACKBEATS, OPT_RSPLIT, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -173,7 +175,7 @@ static void parse_args(int argc, char **argv)
 {
 	static const struct option lo[] = {
 		{"mode", 1, 0, OPT_MODE}, {"op", 1, 0, OPT_OP}, {"window", 1, 0, OPT_WINDOW}, {"pack", 1, 0, OPT_PACK},
-		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
+		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-echo-aruser", 1, 0, OPT_RECHO}, {"ar-user-low", 1, 0, OPT_ARUSERLOW}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
 		{"vid", 1, 0, OPT_VID}, {"nosplit", 0, 0, OPT_NOSPLIT}, {"dump", 1, 0, OPT_DUMP}, {"flows", 1, 0, OPT_FLOWS},
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
@@ -203,6 +205,11 @@ static void parse_args(int argc, char **argv)
 		case OPT_COUNT:   g_cfg.count = strtoull(optarg, NULL, 0); break;
 		case OPT_GAP:     g_cfg.gap_us = (uint32_t)num(optarg); break;
 		case OPT_RLENDATA: g_cfg.r_len_data = true; break;
+		case OPT_ARUSERLOW: g_cfg.ar_user_low = (uint32_t)strtoul(optarg, NULL, 0) & 0x3FFFFFFF; g_cfg.has_ar_user_low = true; break;
+		case OPT_RECHO:
+			g_cfg.r_echo = (int)num(optarg);
+			if (g_cfg.r_echo < 0 || g_cfg.r_echo > 48) { printf("--r-echo-aruser 须为 0~48\n"); exit(1); }
+			break;
 		case OPT_RPACKBEATS: g_cfg.r_pack_beats = true; break;
 		case OPT_RSPLIT: g_cfg.r_split = (int)num(optarg); break;
 		case OPT_RBEATS:
@@ -272,10 +279,13 @@ static void parse_args(int argc, char **argv)
 		default: usage(); exit(1);
 		}
 	}
-	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || g_cfg.mix || (g_cfg.fpp & (g_cfg.fpp - 1)) || g_cfg.fpp * g_cfg.window > ID_SPACE)) {
-		printf("--ethertype 的 sender 只支持单写 / 单读，--flows 须为 2 的幂，且 flows × window ≤ %d（超过 512 时线上 ID 复用）\n", ID_SPACE);
+	if (g_cfg.ethertype && g_cfg.sender && (g_cfg.rw || (g_cfg.fpp & (g_cfg.fpp - 1)) || g_cfg.fpp * g_cfg.window > ID_SPACE)) {
+		printf("--ethertype 的 sender 不支持 rw（读写并发用 mix：偶数流写、奇数流读），--flows 须为 2 的幂，且 flows × window ≤ %d（超过 512 时线上 ID 复用）\n", ID_SPACE);
 		exit(1);
 	}
+	/* aruser[27:20] sect_mask（64B 总线）= {N{2'b11}} << {araddr[7:6], 1'b0}；地址固定为 0，不移位 */
+	if (g_cfg.ethertype && g_cfg.sender && !g_cfg.has_ar_user_low && g_cfg.beats >= 1 && g_cfg.beats <= 4)
+		g_cfg.ar_user_low = ((1u << (2 * g_cfg.beats)) - 1) << 20;
 	if (g_cfg.count && (!g_cfg.sender || g_cfg.tx_cores > 1)) { printf("--count 只用于 sender，且不能与 --tx-cores > 1 同用\n"); exit(1); }
 	if (g_cfg.rxd < 64 || g_cfg.rxd > 32768 || (g_cfg.rxd & (g_cfg.rxd - 1))) { printf("--rxd 须为 2 的幂、64~32768\n"); exit(1); }
 	if (g_cfg.rx_split) {
