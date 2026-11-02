@@ -141,6 +141,21 @@ int reflector_loop(void *arg)
 						rp = rte_pktmbuf_mtod(rm, uint8_t *) + hl;
 						beats_in = 0; cnt = 0;
 					}
+					if (g_cfg.r_split) {                 /* --r-split：每拍一个 R 头，最后一拍 rlast（W0 bit 3）= 1；2 = 每拍单独一帧 */
+						for (uint32_t q = 0; q < b; q++) {
+							if (!rm) {
+								rm = rte_pktmbuf_alloc(c->tmpl_pool);
+								if (!rm) { s->err++; break; }
+								rp = rte_pktmbuf_mtod(rm, uint8_t *) + hl;
+								beats_in = 0; cnt = 0;
+							}
+							put_be32(rp, axi_w0_r(ids[j], 1) | (q == b - 1 ? 1u << 3 : 0));
+							rp += R_HDR + BEAT;
+							beats_in++; cnt++;
+							if (g_cfg.r_split == 2) { r_finish(rm, rp, f, cnt, hl); tx[nt++] = rm; rm = NULL; }
+						}
+						continue;
+					}
 					put_be32(rp, axi_w0_r(ids[j], b));  /* rdata 已由模板预填 */
 					rp += R_HDR + b * BEAT;
 					beats_in += b; cnt++;

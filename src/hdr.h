@@ -81,7 +81,8 @@ static inline void oisa_reply(uint8_t *f, const uint8_t *req, uint8_t vc, uint16
 	put_be16(f + 4, 0);
 	put_be16(f + 6, tag);
 	put_be16(f + 8, src);
-	put_be16(f + 10, (uint16_t)((ntxn << 10) | dest));
+	const uint16_t pack = g_cfg.r_pack_beats && vc != VC_B_TAG ? (uint16_t)((plen - ntxn * 4) / 64) : ntxn;   /* 总拍数 = (plen - R 头) / 64 */
+	put_be16(f + 10, (uint16_t)((pack << 10) | dest));
 }
 
 /*

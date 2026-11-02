@@ -111,6 +111,8 @@ static void usage(void)
 	"  --gap-us N               sender：调试用，每隔 N 微秒最多发 1 个请求包；0 = 不限速 [0]\n"
 	"  --r-beats N              reflector：调试用，读响应固定回 N 拍（1~4），不看请求的 arlen；0 = 按请求 [0]\n"
 	"  --r-len-data             reflector：调试用，读响应 OISA length 填数据字节数，默认填整帧长\n"
+	"  --r-pack-beats           reflector：调试用，读响应 OISA packing_num 填总拍数，默认填事务数\n"
+	"  --r-split N              reflector：调试用，读响应每拍一个 R 头（rlen=0），只有最后一拍 rlast=1；1 = 同一帧，2 = 每拍单独一帧\n"
 	"  --b-port N               reflector：写响应 B 的 port id（W0[7:5]），0~7 [0]\n"
 	"  --b-tag X                reflector：--ethertype 时写响应 EtherType 后的 16 位 [0]\n"
 	"  --req-b1 X               sender 调试：请求 OISA 头第 1 字节（format + packet type）\n"
@@ -162,7 +164,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RPACKBEATS, OPT_RSPLIT, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -171,7 +173,7 @@ static void parse_args(int argc, char **argv)
 {
 	static const struct option lo[] = {
 		{"mode", 1, 0, OPT_MODE}, {"op", 1, 0, OPT_OP}, {"window", 1, 0, OPT_WINDOW}, {"pack", 1, 0, OPT_PACK},
-		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
+		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
 		{"vid", 1, 0, OPT_VID}, {"nosplit", 0, 0, OPT_NOSPLIT}, {"dump", 1, 0, OPT_DUMP}, {"flows", 1, 0, OPT_FLOWS},
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
@@ -201,6 +203,8 @@ static void parse_args(int argc, char **argv)
 		case OPT_COUNT:   g_cfg.count = strtoull(optarg, NULL, 0); break;
 		case OPT_GAP:     g_cfg.gap_us = (uint32_t)num(optarg); break;
 		case OPT_RLENDATA: g_cfg.r_len_data = true; break;
+		case OPT_RPACKBEATS: g_cfg.r_pack_beats = true; break;
+		case OPT_RSPLIT: g_cfg.r_split = (int)num(optarg); break;
 		case OPT_RBEATS:
 			g_cfg.r_beats = (int)num(optarg);
 			if (g_cfg.r_beats < 0 || g_cfg.r_beats > 4) { printf("--r-beats 须为 0~4\n"); exit(1); }

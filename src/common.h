@@ -74,6 +74,8 @@ struct config {
 	uint64_t gap_cyc;            /* 同上，TSC 周期 */
 	int    r_beats;              /* reflector：调试用，读响应固定回 N 拍，不看请求的 arlen（0 = 按请求） */
 	bool   r_len_data;           /* reflector：调试用，读响应 OISA length 填数据字节数（E100c 发出的格式），默认填整帧长 */
+	bool   r_pack_beats;         /* reflector：调试用，读响应 OISA packing_num 填总拍数，默认填事务数 */
+	int    r_split;              /* reflector：调试用，读响应每拍一个 R 头（rlen=0），只有最后一拍 rlast=1；1 = 同一帧，2 = 每拍单独一帧 */
 	int    rpack;                /* sender：读请求每包事务数（0 = 同 --pack） */
 	int    b_pack;               /* reflector：每个写响应包最多合并的 B 个数，1~16（默认 1） */
 	bool   hwts;                 /* 开接收硬件时间戳，统计接收时延（网卡收到 → CPU 拿到） */
