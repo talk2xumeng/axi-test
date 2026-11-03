@@ -16,6 +16,8 @@
 #   3  ens114np0 发送 → E100c → ens110np0 反射（die1 chip3 → die0 chip1，两口都在 NUMA1）
 # 其他对口用名字代替 id：
 #   e100c_r  ens101np0 发送 → E100c → ens106np0 反射（id 2 的反方向，user.port 0，b-port 2）
+#   e100c_r1 ens111np0 发送 → E100c → ens119np0 反射（id 1 的反方向，借用 id 3 的核，可用 -f 8、-r 8）
+#   r0~r3    id 0~3 的反方向（如 r0：ens103np0 发送 → ens108np0 反射），和正方向一起跑时两边都加 --iso；最多 -f 4、-r 4
 #   e100c2   ens111np0 发送 → E100c → ens119np0 反射（要先填下面的 E100C_MAC2、E100C_PORT2）
 #   direct   ens102np0 发送 → 直连 → ens110np0 反射
 #
@@ -108,6 +110,14 @@
 #   ./scripts/e100c.sh 2 snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
 #   ./scripts/e100c.sh e100c_r snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
 #
+# 2 对口双向打写（每个 NUMA 一对，8 流 + 8 核，合计约 398G）：
+#   for i in 2 e100c_r 1 e100c_r1; do ./scripts/e100c.sh $i refl --iso -r 8 --time 50 & done; sleep 10
+#   for i in 2 e100c_r 1 e100c_r1; do ./scripts/e100c.sh $i snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso & done; wait
+#
+# 4 对口双向打写：8 个方向同时跑（合计约 512G，受主机核数限制只能 4 流 + 4 核）：
+#   for i in 0 1 2 3 r0 r1 r2 r3; do ./scripts/e100c.sh $i refl --iso -r 4 --time 50 & done; sleep 10
+#   for i in 0 1 2 3 r0 r1 r2 r3; do ./scripts/e100c.sh $i snd write 200 -f 4 -s -t 30 --pack 2 --beats 4 --id-seq --iso & done; wait
+#
 # 看网卡计数（另开窗口）：
 #   ./scripts/e100c.sh 1 cnt snd
 #   ./scripts/e100c.sh 1 cnt refl
@@ -159,6 +169,23 @@ e100c_r)  # id 2 的反方向，NUMA0：借用 id 0 的核（发送 27~43，反�
 	REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=44 REFL_C0=45
 	E100C_MAC=$E100C_MAC1 E100C_PORT=0 B_PORT=2
 	;;
+r0|r1|r2|r3)  # id 0~3 的反方向：port = id xor 2，b-port = id；发送端主核放超线程（反射端用 -l，核号须小于 128），避开正方向 -f 4 -s、反射端 4 核时用的核（-f 最多 4、-r 最多 4）
+	N=${ID#r} PAIR=e100c_$ID
+	case $N in
+	0) SND_IF=ens103np0 SND_BDF=0000:62:00.0 SND_TX=36  REFL_IF=ens108np0 REFL_BDF=0000:73:00.0 REFL_MAIN=53 REFL_C0=49 ;;
+	1) SND_IF=ens111np0 SND_BDF=0000:dd:00.0 SND_TX=74  REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=117 REFL_C0=87 ;;
+	2) SND_IF=ens101np0 SND_BDF=0000:60:00.0 SND_TX=10  REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=54 REFL_C0=23 ;;
+	3) SND_IF=ens110np0 SND_BDF=0000:dc:00.0 SND_TX=100 REFL_IF=ens114np0 REFL_BDF=0000:e0:00.0 REFL_MAIN=118 REFL_C0=113 ;;
+	esac
+	SND_RX=$((SND_TX + 128)) SND_MAIN=$((SND_TX + 136))   # 主核放在第 9 个核的超线程，不与 -s 时的 8 个发送 / 接收核共用
+	E100C_MAC=$E100C_MAC1 E100C_PORT=$((N ^ 2)) B_PORT=$N
+	;;
+e100c_r1)  # id 1 的反方向，NUMA1：借用 id 3 的核（发送 91~107，反射 108~116），不能和 id 3 同时跑；可与 id 1 同时跑（双向打流加 --iso）
+	PAIR=e100c_r1
+	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=91  SND_TX=92  SND_RX=220
+	REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=108 REFL_C0=109
+	E100C_MAC=$E100C_MAC1 E100C_PORT=3 B_PORT=1
+	;;
 e100c2)  # 两口都在 NUMA1
 	PAIR=e100c2
 	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=88  SND_TX=89  SND_RX=217
@@ -170,7 +197,7 @@ direct)  # 发送端 NUMA0，反射端 NUMA1
 	SND_IF=ens102np0  SND_BDF=0000:61:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
 	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=80 REFL_C0=81
 	;;
-*) echo "第一个参数须为 id（0~3）或 e100c_r、e100c2、direct；用法看 $0 help" >&2; exit 1 ;;
+*) echo "第一个参数须为 id（0~3）、r0~r3 或 e100c_r、e100c_r1、e100c2、direct；用法看 $0 help" >&2; exit 1 ;;
 esac
 
 cmd=$1; [ $# -gt 0 ] && shift
