@@ -10,16 +10,17 @@
 #   ./scripts/e100c.sh <id> cap [帧数]            抓进反射端网口的帧（先停反射端），存 /tmp/refl_in_<名字>.pcap
 #
 # <id> 是请求里的 user.port（E100c 的 port id），每个 id 对应一对口：
-#   0  ens108np0 发送 → E100c → ens103np0 反射（die1 chip0 → die0 chip2）
-#   1  ens119np0 发送 → E100c → ens111np0 反射（die1 chip1 → die0 chip3，两口都在 NUMA1）
-#   2  ens106np0 发送 → E100c → ens101np0 反射（两口都在 NUMA0）
-#   3  ens114np0 发送 → E100c → ens110np0 反射（die1 chip3 → die0 chip1，两口都在 NUMA1）
+#   0  ens108np0 → ens110np0（die1 chip0 → die0 chip2）
+#   1  ens111np0 → ens106np0（die1 chip1 → die0 chip3）
+#   2  ens103np0 → ens101np0（die1 chip2 → die0 chip0；已做双向写和小包验证）
+#   3  ens114np0 → ens119np0（die1 chip3 → die0 chip1）
 # 其他对口用名字代替 id：
-#   e100c_r  ens101np0 发送 → E100c → ens106np0 反射（id 2 的反方向，user.port 0，b-port 2）
-#   e100c_r1 ens111np0 发送 → E100c → ens119np0 反射（id 1 的反方向，借用 id 3 的核，可用 -f 8、-r 8）
-#   r0~r3    id 0~3 的反方向（如 r0：ens103np0 发送 → ens108np0 反射），和正方向一起跑时两边都加 --iso；最多 -f 4、-r 4
-#   e100c2   ens111np0 发送 → E100c → ens119np0 反射（要先填下面的 E100C_MAC2、E100C_PORT2）
+#   r0~r3    id 0~3 的反方向（如 r0：ens110np0 → ens108np0），和正方向一起跑时两边都加 --iso；最多 -f 4、-r 4
+#   b2       id 2 的反方向，供单对口双向 8 流、8 核反射使用；不能与 id 0、1 并发（借用其 NUMA0 核）
+#   y0、y3   对应当前接线的 id 0、3；z1 为 ens111 → ens110 的交叉路由，不与 id 0、1 并发
+#   e100c_r  是 b2 的兼容别名；e100c_r1、e100c2、x1、xa、xb 是旧接线专用，已停用
 #   direct   ens102np0 发送 → 直连 → ens110np0 反射
+#   d0~d2    网线直连：d0 = ens108 → ens103，d1 = ens111 → ens110，d2 = ens106 → ens101（拔掉 E100c 的线，两口直接对接）
 #
 # 选项（可放在命令后任意位置，其余参数原样传给 axiperf）：
 #   -f N     发送端流数，N 为 2 的幂 [snd 4，ping 1，--sue 1]。mix 时是读写合计：偶数号流写、奇数号流读，-f 8 即 4 流写 + 4 流读
@@ -27,12 +28,13 @@
 #   -n N     ping 只发 N 帧（1~511）
 #   -r N     反射端核数 1、2、4、8、16 [4]。1 = 单队列单核，响应严格按收到的顺序发出。
 #            读写混跑时 8 核比 4 核高约 16%（110G → 128G）；16 核反而更低。只读、只写 4 核和 8 核相同。
-#            已知问题：id 0、id 2 同时用 -r 8 时两对都掉到约 3G（原因未查），NUMA0 上最多一对用 -r 8
+#            旧接线下曾观察到两对同时用 -r 8 掉速；新接线尚未验证
 #   -s       接收核不与发送核共用物理核（读的性能配置要加）
 #   -v       完整输出（每流结果、MAC、ign、xmac、pcpx）；默认精简输出
 #   --txc N  发送端每上下文 N 个发送核 [1]
 #   --sue    发送端改用 SUEv1-标准ETH 头（事务头在第 20 字节；反射端只有单流，本端 GPU ID 取 SUE_DST）
 #   --iso    发送端、反射端都加 --isolate：同一网口可同时跑本方向的发送端和反方向的反射端（双向打流）；反射端多核按请求 tag 低位分队列
+#   --dry-run 只打印 ping / snd / refl 的命令，不运行 sudo 或 axiperf
 #
 # 常用的 axiperf 参数（直接加在命令后面）：
 #   发送端：--beats N  每事务拍数      --pack N  写每帧事务数      --rpack N  读每帧事务数（最多 4）
@@ -82,7 +84,7 @@
 #   读 4 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 2 --beats 4 --id-seq & done; wait
 #   读 1 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq & done; wait
 #   读写混跑：for i in 0 1 2 3; do ./scripts/e100c.sh $i snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq & done; wait
-#   约 390G（每对约 100G）。4 对口时不要用 -r 8：id 0、id 2 同时用 8 核会掉到约 3G
+#   新接线下的四对口并发性能尚未验证；以上示例使用 4 核反射端
 #
 # 测试方法：
 #   - 单对口每次只改一个变量（拍数、每帧事务数、流数、窗口、反射端核数），其他保持“4 流 × 200，-s，--id-seq”。
@@ -104,15 +106,17 @@
 #   ./scripts/e100c.sh 1 refl -r 8
 #   ./scripts/e100c.sh 1 snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq
 #
-# 双向打写：ens106 → ens101（id 2）和 ens101 → ens106（e100c_r）同时跑，4 个进程分开窗口（每方向约 100G，合计约 200G；e100c_r 借用 id 0 的核）：
-#   ./scripts/e100c.sh 2 refl --iso -r 8
-#   ./scripts/e100c.sh e100c_r refl --iso -r 8
-#   ./scripts/e100c.sh 2 snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
-#   ./scripts/e100c.sh e100c_r snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
+# 双向打写示例（id 0 和 r0，四个进程分开窗口）：
+#   ./scripts/e100c.sh 0 refl --iso -r 4
+#   ./scripts/e100c.sh r0 refl --iso -r 4
+#   ./scripts/e100c.sh 0 snd write 200 -f 4 -s -t 30 --pack 2 --beats 4 --id-seq --iso
+#   ./scripts/e100c.sh r0 snd write 200 -f 4 -s -t 30 --pack 2 --beats 4 --id-seq --iso
 #
-# 2 对口双向打写（每个 NUMA 一对，8 流 + 8 核，合计约 398G）：
-#   for i in 2 e100c_r 1 e100c_r1; do ./scripts/e100c.sh $i refl --iso -r 8 --time 50 & done; sleep 10
-#   for i in 2 e100c_r 1 e100c_r1; do ./scripts/e100c.sh $i snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso & done; wait
+# 单对口双向打写（ens103 ↔ ens101，每方向 8 流 × 100、反射 8 核；b2 借用其他对口的核）：
+#   ./scripts/e100c.sh 2 refl --iso -r 8
+#   ./scripts/e100c.sh b2 refl --iso -r 8
+#   ./scripts/e100c.sh 2 snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
+#   ./scripts/e100c.sh b2 snd write 100 -f 8 -s -t 30 --pack 2 --beats 4 --id-seq --iso
 #
 # 4 对口双向打写：8 个方向同时跑（合计约 512G，受主机核数限制只能 4 流 + 4 核）：
 #   for i in 0 1 2 3 r0 r1 r2 r3; do ./scripts/e100c.sh $i refl --iso -r 4 --time 50 & done; sleep 10
@@ -136,48 +140,49 @@ MIN_FRAME=0 B_PORT=0 B_TAG=0 R_USER=0   # 反射端默认值，命令行加 --mi
 usage() { sed -n '2,/^# 改环境时/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 ID=$1; [ $# -gt 0 ] && shift
+DIRECT=0   # 1 = 网口直连，不经过 E100c（标准帧格式，DMAC 用反射口 MAC）
 case "$ID" in
 ""|-h|--help|help) usage; exit 0 ;;
 setup|check) for i in 0 1 2 3; do "$0" "$i" "$ID" || exit; done; exit 0 ;;
-0|e100c_b)  # die1 chip0 → die0 chip2；NUMA0：发送 27~43，反射 44~52
+0|e100c_b)  # die1 chip0 → die0 chip2；发送 NUMA0，反射 NUMA1
 	PAIR=e100c_b
 	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=27  SND_TX=28  SND_RX=156
-	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=44 REFL_C0=45
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
 	E100C_MAC=$E100C_MAC1 E100C_PORT=0
 	;;
-1|e100c_d)  # die1 chip1 → die0 chip3；NUMA1：发送 65~81，反射 82~90
+1|e100c_d)  # die1 chip1 → die0 chip3；发送 NUMA1，反射 NUMA0
 	PAIR=e100c_d
-	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
-	REFL_IF=ens111np0 REFL_BDF=0000:dd:00.0 REFL_MAIN=82 REFL_C0=83
+	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=44 REFL_C0=45
 	E100C_MAC=$E100C_MAC1 E100C_PORT=1
 	;;
-2|e100c)   # die1 chip2 → die0 chip0；NUMA0：发送 1~17，反射 18~26
+2|e100c)   # die1 chip2 → die0 chip0
 	PAIR=e100c
-	SND_IF=ens106np0  SND_BDF=0000:71:00.0  SND_MAIN=1   SND_TX=2   SND_RX=130
+	SND_IF=ens103np0  SND_BDF=0000:62:00.0  SND_MAIN=1   SND_TX=2   SND_RX=130
 	REFL_IF=ens101np0 REFL_BDF=0000:60:00.0 REFL_MAIN=18 REFL_C0=19
 	E100C_MAC=$E100C_MAC1 E100C_PORT=2
 	;;
-3|e100c_c)  # die1 chip3 → die0 chip1；NUMA1：发送 91~107，反射 108~116
+3|e100c_c)  # die1 chip3 → die0 chip1；两端 NUMA1
 	PAIR=e100c_c
 	SND_IF=ens114np0  SND_BDF=0000:e0:00.0  SND_MAIN=91  SND_TX=92  SND_RX=220
-	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
+	REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=82 REFL_C0=83
 	E100C_MAC=$E100C_MAC1 E100C_PORT=3
 	;;
-e100c_r)  # id 2 的反方向，NUMA0：借用 id 0 的核（发送 27~43，反射 44~52），不能和 id 0 同时跑；可与 id 2 同时跑（双向打流加 --iso）
+b2|e100c_r)  # id 2 的反方向，8 流 + 8 核反射；借用 id 0、1 在 NUMA0 的核
 	PAIR=e100c_r
 	SND_IF=ens101np0  SND_BDF=0000:60:00.0  SND_MAIN=27  SND_TX=28  SND_RX=156
-	REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=44 REFL_C0=45
+	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=44 REFL_C0=45
 	E100C_MAC=$E100C_MAC1 E100C_PORT=0 B_PORT=2
 	;;
-r0|r1|r2|r3)  # id 0~3 的反方向：port = id xor 2，b-port = id；发送端主核放超线程（反射端用 -l，核号须小于 128），避开正方向 -f 4 -s、反射端 4 核时用的核（-f 最多 4、-r 最多 4）
+r0|r1|r2|r3)  # id 0~3 的反方向：port = id xor 2，b-port = id；与正方向并发最多 -f 4、-r 4
 	N=${ID#r} PAIR=e100c_$ID
 	case $N in
-	0) SND_IF=ens103np0 SND_BDF=0000:62:00.0 SND_TX=36  REFL_IF=ens108np0 REFL_BDF=0000:73:00.0 REFL_MAIN=53 REFL_C0=49 ;;
-	1) SND_IF=ens111np0 SND_BDF=0000:dd:00.0 SND_TX=74  REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=117 REFL_C0=87 ;;
-	2) SND_IF=ens101np0 SND_BDF=0000:60:00.0 SND_TX=10  REFL_IF=ens106np0 REFL_BDF=0000:71:00.0 REFL_MAIN=54 REFL_C0=23 ;;
-	3) SND_IF=ens110np0 SND_BDF=0000:dc:00.0 SND_TX=100 REFL_IF=ens114np0 REFL_BDF=0000:e0:00.0 REFL_MAIN=118 REFL_C0=113 ;;
+	0) SND_IF=ens110np0 SND_BDF=0000:dc:00.0 SND_TX=100 SND_MAIN=251 REFL_IF=ens108np0 REFL_BDF=0000:73:00.0 REFL_MAIN=53 REFL_C0=49 ;;
+	1) SND_IF=ens106np0 SND_BDF=0000:71:00.0 SND_TX=36  SND_MAIN=187 REFL_IF=ens111np0 REFL_BDF=0000:dd:00.0 REFL_MAIN=118 REFL_C0=113 ;;
+	2) SND_IF=ens101np0 SND_BDF=0000:60:00.0 SND_TX=10  SND_MAIN=188 REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=54 REFL_C0=23 ;;
+	3) SND_IF=ens119np0 SND_BDF=0000:f1:00.0 SND_TX=74  SND_MAIN=252 REFL_IF=ens114np0 REFL_BDF=0000:e0:00.0 REFL_MAIN=117 REFL_C0=87 ;;
 	esac
-	SND_RX=$((SND_TX + 128)) SND_MAIN=$((SND_TX + 136))   # 主核放在第 9 个核的超线程，不与 -s 时的 8 个发送 / 接收核共用
+	SND_RX=$((SND_TX + 128))   # 反向主核单独指定，避免与其他对口工作核共用物理核
 	E100C_MAC=$E100C_MAC1 E100C_PORT=$((N ^ 2)) B_PORT=$N
 	;;
 e100c_r1)  # id 1 的反方向，NUMA1：借用 id 3 的核（发送 91~107，反射 108~116），不能和 id 3 同时跑；可与 id 1 同时跑（双向打流加 --iso）
@@ -186,24 +191,79 @@ e100c_r1)  # id 1 的反方向，NUMA1：借用 id 3 的核（发送 91~107，�
 	REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=108 REFL_C0=109
 	E100C_MAC=$E100C_MAC1 E100C_PORT=3 B_PORT=1
 	;;
+x1)  # 交叉路由：ens119（NUMA1）→ ens103（NUMA0），die1 chip1 → die0 chip2；发送端用 id 1 的核，反射端借 id 0 的核，不能和 id 0、id 1 同时跑
+	PAIR=e100c_x1
+	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=44 REFL_C0=45
+	E100C_MAC=$E100C_MAC1 E100C_PORT=0
+	;;
+xa)  # 换线后用（ens101 接 die0 chip1，ens110 接 die0 chip0）：ens119 → ens101，die1 chip1 → die0 chip1；和 id 0 共用反射端交换芯片、不共用 chip 组
+	PAIR=e100c_xa
+	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens101np0 REFL_BDF=0000:60:00.0 REFL_MAIN=18 REFL_C0=19
+	E100C_MAC=$E100C_MAC1 E100C_PORT=3
+	;;
+xb)  # 换线后用：ens119 → ens110，die1 chip1 → die0 chip0；和 id 0 只共用 die0 的 chip 0、2 一组，主机侧什么都不共用
+	PAIR=e100c_xb
+	SND_IF=ens119np0  SND_BDF=0000:f1:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
+	E100C_MAC=$E100C_MAC1 E100C_PORT=2
+	;;
 e100c2)  # 两口都在 NUMA1
 	PAIR=e100c2
 	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=88  SND_TX=89  SND_RX=217
 	REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=72 REFL_C0=73
 	E100C_MAC=$E100C_MAC2 E100C_PORT=$E100C_PORT2
 	;;
+d0)  # 直连：ens108 ↔ ens103 用网线对接（不经过 E100c），核同 id 0
+	PAIR=direct_d0 DIRECT=1
+	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=27  SND_TX=28  SND_RX=156
+	REFL_IF=ens103np0 REFL_BDF=0000:62:00.0 REFL_MAIN=44 REFL_C0=45
+	;;
+y0)  # 11-03 晚的临时接线：ens108（die1 chip0）→ port 0 → ens110（die0 chip2）；发送端用 id 0 的核，反射端借 id 3 的核
+	PAIR=e100c_y0
+	SND_IF=ens108np0  SND_BDF=0000:73:00.0  SND_MAIN=27  SND_TX=28  SND_RX=156
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
+	E100C_MAC=$E100C_MAC1 E100C_PORT=0
+	;;
+y3)  # 11-03 晚的临时接线：ens114（die1 chip3）→ port 3 → ens119（die0 chip1）；发送端用 id 3 的核，反射端借 id 1 的核
+	PAIR=e100c_y3
+	SND_IF=ens114np0  SND_BDF=0000:e0:00.0  SND_MAIN=91  SND_TX=92  SND_RX=220
+	REFL_IF=ens119np0 REFL_BDF=0000:f1:00.0 REFL_MAIN=82 REFL_C0=83
+	E100C_MAC=$E100C_MAC1 E100C_PORT=3
+	;;
+z1)  # 11-04 接线：ens111（die1）→ port 0 → ens110（die0 chip2）；网卡和核与直连 d1 相同，用来和 d1 对比时延
+	PAIR=e100c_z1
+	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
+	E100C_MAC=$E100C_MAC1 E100C_PORT=0
+	;;
+d1)  # 直连：ens111 ↔ ens110 用网线对接（不经过 E100c），发送端借 id 1 的核，反射端借 id 3 的核
+	PAIR=direct_d1 DIRECT=1
+	SND_IF=ens111np0  SND_BDF=0000:dd:00.0  SND_MAIN=65  SND_TX=66  SND_RX=194
+	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=108 REFL_C0=109
+	;;
+d2)  # 直连：ens106 ↔ ens101 用网线对接（不经过 E100c），核同 id 2
+	PAIR=direct_d2 DIRECT=1
+	SND_IF=ens106np0  SND_BDF=0000:71:00.0  SND_MAIN=1   SND_TX=2   SND_RX=130
+	REFL_IF=ens101np0 REFL_BDF=0000:60:00.0 REFL_MAIN=18 REFL_C0=19
+	;;
 direct)  # 发送端 NUMA0，反射端 NUMA1
-	PAIR=direct
+	PAIR=direct DIRECT=1
 	SND_IF=ens102np0  SND_BDF=0000:61:00.0  SND_MAIN=40  SND_TX=41  SND_RX=169
 	REFL_IF=ens110np0 REFL_BDF=0000:dc:00.0 REFL_MAIN=80 REFL_C0=81
 	;;
-*) echo "第一个参数须为 id（0~3）、r0~r3 或 e100c_r、e100c_r1、e100c2、direct；用法看 $0 help" >&2; exit 1 ;;
+*) echo "第一个参数须为 id（0~3）、r0~r3、b2、y0、y3、z1、d0、d1、d2、e100c_r 或 direct；用法看 $0 help" >&2; exit 1 ;;
 esac
 
+case "$ID" in
+e100c_r1|e100c2|x1|xa|xb)
+	echo "对口 $ID 属于旧接线，已停用；请使用当前接线的 0~3、r0~r3 或 z1" >&2; exit 1 ;;
+esac
 cmd=$1; [ $# -gt 0 ] && shift
 
 # 取出脚本自己的选项，其余留给 axiperf
-FLOWS= T= COUNT= REFL_CORES=4 SEP_RX=0 BRIEF=1 TXC=1 HDR=eth ISO_ARG= rest=()
+FLOWS= T= COUNT= REFL_CORES=4 SEP_RX=0 BRIEF=1 TXC=1 HDR=eth ISO_ARG= DRY_RUN=0 rest=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-f) FLOWS=$2; shift 2 ;;
@@ -215,31 +275,41 @@ while [ $# -gt 0 ]; do
 	--txc) TXC=$2; shift 2 ;;
 	--sue) HDR=sue; shift ;;
 	--iso) ISO_ARG=--isolate; shift ;;
+	--dry-run) DRY_RUN=1; shift ;;
 	*) rest+=("$1"); shift ;;
 	esac
 done
 set -- "${rest[@]}"
+if [ "$DRY_RUN" = 1 ]; then
+	case "$cmd" in ping|snd|refl) ;; *) echo "--dry-run 仅支持 ping、snd、refl" >&2; exit 1 ;; esac
+fi
+case "$ID" in
+r0|r1|r2|r3)
+	[ "$REFL_CORES" -le 4 ] && [ "${FLOWS:-4}" -le 4 ] && [ "$TXC" = 1 ] || {
+		echo "$ID 的并发核布局最多支持 4 流、4 核反射、每流 1 个发送核；id 2 的 8 流双向请使用 b2" >&2; exit 1; }
+	;;
+esac
 
 # E100c 格式：EtherType 0x88ee + 0000，事务头从第 16 字节开始；多流时响应按 dest_id 低位导流
-if [ "$PAIR" = direct ]; then NOLEN_ARG=
+if [ "$DIRECT" = 1 ]; then NOLEN_ARG=
 elif [ "$HDR" = sue ]; then
 	FLOWS=${FLOWS:-1}
 	NOLEN_ARG="--hdr sue --gpu-id $SUE_SRC --peer-gpu-id $SUE_DST --sue-ethertype $SUE_ET --sue-format $SUE_FMT --sue-pkttype $SUE_PT"
 else NOLEN_ARG="--ethertype 0x88ee --min-frame $MIN_FRAME"; fi
 # E100c 的 ID 只在收到响应后释放：不做超时回收重发，否则响应一停，发出的请求会超过 511 把 ID 耗尽
-TMO_ARG=; [ "$PAIR" = direct ] || TMO_ARG="--timeout-us 0"
+TMO_ARG=; [ "$DIRECT" = 1 ] || TMO_ARG="--timeout-us 0"
 # 反射端回的写响应 B 的 port id（ETHI1 的 port 0 经 UHUBT1 到 die1 ETHT3）
-BPORT_ARG=; [ "$PAIR" = direct ] || BPORT_ARG="--b-port $B_PORT --b-tag $B_TAG --r-user $R_USER --b-pack 1"   # OISA 头只有一个 tag_id：每帧 1 个 B
+BPORT_ARG=; [ "$DIRECT" = 1 ] || BPORT_ARG="--b-port $B_PORT --b-tag $B_TAG --r-user $R_USER --b-pack 1"   # OISA 头只有一个 tag_id：每帧 1 个 B
 SND_DA=txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
 REFL_DA=dv_flow_en=2,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
 AXI=$(cd "$(dirname "$0")/.." && pwd)/axiperf
 BRIEF_ARG=--brief; [ "$BRIEF" = 0 ] && BRIEF_ARG=
 
-run() { echo "+ $*"; "$@"; }
+run() { echo "+ $*"; [ "$DRY_RUN" = 1 ] || "$@"; }
 
 need() {
 	local miss=0
-	if [ "$PAIR" != direct ] && [ "$1" = snd ]; then
+	if [ "$DIRECT" != 1 ] && [ "$1" = snd ]; then
 		[ -n "$E100C_MAC" ]  || { echo "未设 $PAIR 的 E100C_MAC" >&2; miss=1; }
 		[ -n "$E100C_PORT" ] || { echo "未设 $PAIR 的 E100C_PORT" >&2; miss=1; }
 	fi
@@ -260,12 +330,12 @@ sender() {
 		id=$((id + 1))
 	done
 	[ "$txc" -gt 1 ] && set -- --tx-cores "$txc" "$@"
-	if [ "$PAIR" != direct ]; then dst="--dmac 0,$E100C_MAC --e100c-port 0,$E100C_PORT"
+	if [ "$DIRECT" != 1 ]; then dst="--dmac 0,$E100C_MAC --e100c-port 0,$E100C_PORT"
 	else dst="--dmac 0,$(cat /sys/class/net/$REFL_IF/address)"; fi
 	[ "$E100C_PORT" = 0 ] && dst="${dst/ --e100c-port 0,0/}"   # 不传该参数时 user.port 就是 0
 	local rp=; [ "$op" = write ] || rp="--rpack 4"
-	[ "$PAIR" != direct ] && dst="$dst --smac $E100C_SMAC"
-	[ "$HDR" = sue ] && [ "$PAIR" != direct ] && { dst=; [ "$E100C_PORT" = 0 ] || dst="--e100c-port 0,$E100C_PORT"; }   # 地址由 GPU ID 决定
+	[ "$DIRECT" != 1 ] && dst="$dst --smac $E100C_SMAC"
+	[ "$HDR" = sue ] && [ "$DIRECT" != 1 ] && { dst=; [ "$E100C_PORT" = 0 ] || dst="--e100c-port 0,$E100C_PORT"; }   # 地址由 GPU ID 决定
 	run sudo "$AXI" --file-prefix "axisnd_$PAIR" --huge-unlink --lcores "$lc" -a "$SND_BDF,$SND_DA" -- \
 		--mode sender --vid "$VID" --flows $FLOWS --burst 16 --window "$w" --time "$t" $dst --one-dmac $NOLEN_ARG $TMO_ARG --op "$op" $rp $ISO_ARG "$@"
 }
@@ -274,7 +344,7 @@ case "$cmd" in
 setup)
 	for i in $SND_IF $REFL_IF; do
 		[ -e "/sys/class/net/$i" ] || { echo "跳过 $i：接口不存在"; continue; }
-		if [ "$PAIR" != direct ]; then   # 内核的 mDNS / DHCP / IPv6 帧也会进 E100c，被当成请求，先让测试口静默（重启后恢复）
+		if [ "$DIRECT" != 1 ]; then   # 内核的 mDNS / DHCP / IPv6 帧也会进 E100c，被当成请求，先让测试口静默（重启后恢复）
 			run sudo nmcli device set "$i" managed no
 			run sudo sysctl -q "net.ipv6.conf.$i.disable_ipv6=1"
 		fi
