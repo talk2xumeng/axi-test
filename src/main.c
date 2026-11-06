@@ -36,7 +36,7 @@ struct config g_cfg = {
 	.sender = true, .read = false, .window = 511, .pack = 2, .beats = 4, .burst = 32,
 	.rxd = NB_RXD, .time = 0, .split = true, .fpp = 1, .dump = 0, .pcap_path = NULL, .pcap_left = 1000,
 	.hdr = HDR_ETH, .vid = 0, .timeout_us = 10000, .b_pack = 1, .tx_cores = 1,
-	.req_b1 = -1, .r_echo = -1, .sue_ethertype = 0x88B5,.sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
+	.req_b1 = -1, .r_echo = -1, .e100c_rport = -1, .sue_ethertype = 0x88B5,.sue_format = 0, .sue_pkttype = 0, .gpu_id = -1, .peer_gpu_id = -1,
 };
 volatile bool g_quit;
 struct flow_ctx g_flow[MAX_FLOWS];
@@ -128,6 +128,8 @@ static void usage(void)
 	"  --e100c-port PORT,N      sender：DPDK 端口 PORT 接 E100c 的 ETH 口 N（1~4），写入请求的 user.port，可为各端口重复设置\n"
 	"                            （awuser[51:49] / aruser[48:46]；未设为 0）。user.tsn 总是填：每端口写、读各一个计数，\n"
 	"                            每个请求事务一个，从 0 递增、16 bit 循环（awuser[48:33] / aruser[45:30]）\n"
+	"  --e100c-rport N          sender：读请求的 user.port 改填 N（0~7），写请求仍用 --e100c-port；\n"
+	"                            用于 --op mix 时读、写从同一网口发出、经 E100c 走不同出口\n"
 	"  --promisc                强制混杂接收 [默认仅接收本端各流 MAC]\n"
 	"  --isolate                --ethertype 时：rte_flow 隔离模式，sender 只收响应、reflector 只收请求，\n"
 	"                            同一网口可同时跑 sender、reflector 两个进程（双向打流）；reflector 多核用 --flows N（按请求 tag 低位分队列），不用 --rx-split\n"
@@ -168,7 +170,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_ISOLATE, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_E100C_RPORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_ISOLATE, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -182,7 +184,7 @@ static void parse_args(int argc, char **argv)
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
 		{"sue-ethertype", 1, 0, OPT_SUE_ET}, {"sue-format", 1, 0, OPT_SUE_FMT}, {"sue-pkttype", 1, 0, OPT_SUE_PT},
-		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"brief", 0, 0, OPT_BRIEF}, {"no-len", 0, 0, OPT_NOLEN}, {"smac", 1, 0, OPT_SMAC}, {"ethertype", 1, 0, OPT_ETHERTYPE}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
+		{"promisc", 0, 0, OPT_PROMISC}, {"timeout-us", 1, 0, OPT_TIMEOUT}, {"drop-every", 1, 0, OPT_DROP}, {"b-pack", 1, 0, OPT_BPACK}, {"rpack", 1, 0, OPT_RPACK}, {"tx-cores", 1, 0, OPT_TXC}, {"hwts", 0, 0, OPT_HWTS}, {"id-seq", 0, 0, OPT_IDSEQ}, {"one-dmac", 0, 0, OPT_ONEDMAC}, {"rx-split", 1, 0, OPT_RXSPLIT}, {"rxd", 1, 0, OPT_RXD}, {"e100c-port", 1, 0, OPT_E100C_PORT}, {"e100c-rport", 1, 0, OPT_E100C_RPORT}, {"brief", 0, 0, OPT_BRIEF}, {"no-len", 0, 0, OPT_NOLEN}, {"smac", 1, 0, OPT_SMAC}, {"ethertype", 1, 0, OPT_ETHERTYPE}, {"help", 0, 0, OPT_HELP}, {0, 0, 0, 0}};
 
 	for (int i = 0; i < MAX_PORTS; i++) {           /* eth 默认对端 MAC：02:00:00:00:01:0i */
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
@@ -276,6 +278,11 @@ static void parse_args(int argc, char **argv)
 			long n = v ? strtol(v + 1, NULL, 0) : -1;
 			if (pi < 0 || pi >= MAX_PORTS || n < 1 || n > 4) { printf("--e100c-port 格式为 PORT,N，N 为 1~4\n"); exit(1); }
 			g_cfg.e100c_port[pi] = (uint8_t)n;
+			break; }
+		case OPT_E100C_RPORT: {
+			long n = strtol(optarg, NULL, 0);
+			if (n < 0 || n > 7) { printf("--e100c-rport 取 0~7\n"); exit(1); }
+			g_cfg.e100c_rport = (int)n;
 			break; }
 		case 'h':
 		case OPT_HELP: usage(); exit(0);

@@ -97,6 +97,7 @@ struct config {
 	                                解析后 fpp = N，N 个上下文共用网卡 MAC */
 	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */
+	int      e100c_rport;             /* sender：读请求的 user.port（--e100c-rport；-1 = 与写相同，用 --e100c-port） */
 	uint8_t  e100c_port[MAX_PORTS];   /* sender：各 DPDK 端口所接的 E100c ETH 口号 1~4，填入 awuser / aruser 的 user.port（0 = 未设） */
 	/* eth 头 */
 	struct rte_ether_addr peer_mac[MAX_PORTS];   /* sender：各端口对端网卡真实 MAC */

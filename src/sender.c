@@ -100,7 +100,7 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 	if (g_cfg.gap_cyc) L->next_tx = t_s + g_cfg.gap_cyc;
 	if (rte_pktmbuf_alloc_bulk(c->tmpl_pool, tx, n) != 0) return 0;
 
-	const uint32_t uport = g_cfg.e100c_port[c->port];
+	const uint32_t uport = (rd && g_cfg.e100c_rport >= 0) ? (uint32_t)g_cfg.e100c_rport : g_cfg.e100c_port[c->port];
 	uint32_t tsn = __atomic_fetch_add(&g_tsn[c->port][rd].v, (uint32_t)(n * pack), __ATOMIC_RELAXED);
 	uint64_t now = rte_rdtsc();
 	for (int i = 0; i < n; i++) {
