@@ -67,6 +67,7 @@ int reflector_loop(void *arg)
 	struct rte_mbuf *rx[MAX_BURST], *tx[MAX_BURST * 4];
 	const uint16_t hl = hdr_len();
 	const int bpack = g_cfg.b_pack;          /* 每个写响应包最多合并的 B 个数（1 = 每请求包一个响应包） */
+	if (g_cfg.rand) c->rng = rng_seed(g_cfg.seed, 0x10000u + c->idx);
 
 	while (!g_quit) {
 		uint64_t t_s = rte_rdtsc();
@@ -104,6 +105,10 @@ int reflector_loop(void *arg)
 			if (vc == VC_AW) {
 				int k = axi_aw_parse(p, hi.plen, hi.ntxn, ids, &bad);
 				if (bad) { s->err++; dump_bad(s, c->port, "bad AXI write payload", m); }
+				if (g_cfg.rand && k > 0) {           /* --random：校验写数据（在原地改成写响应之前） */
+					const int nbad = axi_aw_check(p, hi.plen, k);
+					if (nbad) { s->derr += (uint64_t)nbad; if (s->derr <= 3) dump_bad(s, c->port, "write data mismatch", m); }
+				}
 				if (k == 0) { fr[nf++] = m; continue; }
 				if (bpack <= 1) {
 					uint16_t plen = axi_b_build(p, ids, k);
@@ -161,6 +166,8 @@ int reflector_loop(void *arg)
 					if (g_cfg.r_echo >= 0)               /* --r-echo-aruser：ruser（W0[16:4]）取自请求的 aruser */
 						w0 = (w0 & ~(0x1FFFu << 4)) | ((uint32_t)((aruser[j] >> g_cfg.r_echo) & 0x1FFF) << 4);
 					put_be32(rp, w0);                    /* rdata 已由模板预填 */
+					if (g_cfg.rand)                      /* --random：读数据填自校验随机图样，发送端校验 */
+						for (uint32_t q = 0; q < b; q++) rand_beat_fill(rp + R_HDR + q * BEAT, (uint32_t)rng_next(&c->rng), q, b);
 					rp += R_HDR + b * BEAT;
 					beats_in += b; cnt++;
 				}

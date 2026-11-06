@@ -128,6 +128,11 @@ static void usage(void)
 	"  --e100c-port PORT,N      sender：DPDK 端口 PORT 接 E100c 的 ETH 口 N（1~4），写入请求的 user.port，可为各端口重复设置\n"
 	"                            （awuser[51:49] / aruser[48:46]；未设为 0）。user.tsn 总是填：每端口写、读各一个计数，\n"
 	"                            每个请求事务一个，从 0 递增、16 bit 循环（awuser[48:33] / aruser[45:30]）\n"
+	"  --random                 随机测试，两端都要加（性能比普通模式低）：sender 每帧事务数在 1~--pack（读为 --rpack）、\n"
+	"                            每事务拍数在 1~--beats 间随机，写帧总拍数 ≤ 8；数据为自校验随机图样。\n"
+	"                            reflector 校验写数据、读响应填随机图样，sender 校验读数据（拍数也要对）；\n"
+	"                            数据不对的事务数在输出的 derr 列。只用于 eth 头，不能与 --tx-cores > 1、--r-split 同用\n"
+	"  --seed N                 --random 的随机种子，用于复现 [启动时的 TSC，启动时打印]\n"
 	"  --e100c-rport N          sender：读请求的 user.port 改填 N（0~7），写请求仍用 --e100c-port；\n"
 	"                            用于 --op mix 时读、写从同一网口发出、经 E100c 走不同出口\n"
 	"  --promisc                强制混杂接收 [默认仅接收本端各流 MAC]\n"
@@ -170,7 +175,7 @@ static bool help_requested(int argc, char **argv)
 enum {
 	OPT_MODE = 256, OPT_OP, OPT_WINDOW, OPT_PACK, OPT_BEATS, OPT_BURST, OPT_TIME, OPT_DMAC, OPT_VID,
 	OPT_NOSPLIT, OPT_DUMP, OPT_FLOWS, OPT_PCAP, OPT_PCAP_COUNT, OPT_HDR, OPT_GPU_ID, OPT_PEER_GPU_ID,
-	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_E100C_RPORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_ISOLATE, OPT_HELP,
+	OPT_SUE_ET, OPT_SUE_FMT, OPT_SUE_PT, OPT_PROMISC, OPT_TIMEOUT, OPT_DROP, OPT_BPACK, OPT_RPACK, OPT_TXC, OPT_HWTS, OPT_IDSEQ, OPT_ONEDMAC, OPT_RXSPLIT, OPT_RXD, OPT_E100C_PORT, OPT_E100C_RPORT, OPT_BRIEF, OPT_NOLEN, OPT_SMAC, OPT_ETHERTYPE, OPT_COUNT, OPT_BPORT, OPT_BTAG, OPT_MINFRAME, OPT_REQB1, OPT_REQTAG, OPT_RUSER, OPT_GAP, OPT_RBEATS, OPT_RLENDATA, OPT_RECHO, OPT_ARUSERLOW, OPT_RPACKBEATS, OPT_RSPLIT, OPT_ISOLATE, OPT_RANDOM, OPT_SEED, OPT_HELP,
 };
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
@@ -179,7 +184,7 @@ static void parse_args(int argc, char **argv)
 {
 	static const struct option lo[] = {
 		{"mode", 1, 0, OPT_MODE}, {"op", 1, 0, OPT_OP}, {"window", 1, 0, OPT_WINDOW}, {"pack", 1, 0, OPT_PACK},
-		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-echo-aruser", 1, 0, OPT_RECHO}, {"ar-user-low", 1, 0, OPT_ARUSERLOW}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT}, {"isolate", 0, 0, OPT_ISOLATE},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
+		{"beats", 1, 0, OPT_BEATS}, {"burst", 1, 0, OPT_BURST}, {"time", 1, 0, OPT_TIME}, {"count", 1, 0, OPT_COUNT}, {"gap-us", 1, 0, OPT_GAP}, {"r-beats", 1, 0, OPT_RBEATS}, {"r-len-data", 0, 0, OPT_RLENDATA}, {"r-echo-aruser", 1, 0, OPT_RECHO}, {"ar-user-low", 1, 0, OPT_ARUSERLOW}, {"r-pack-beats", 0, 0, OPT_RPACKBEATS}, {"r-split", 1, 0, OPT_RSPLIT}, {"isolate", 0, 0, OPT_ISOLATE}, {"random", 0, 0, OPT_RANDOM}, {"seed", 1, 0, OPT_SEED},{"b-port", 1, 0, OPT_BPORT}, {"b-tag", 1, 0, OPT_BTAG}, {"req-b1", 1, 0, OPT_REQB1}, {"req-tag", 1, 0, OPT_REQTAG}, {"r-user", 1, 0, OPT_RUSER}, {"min-frame", 1, 0, OPT_MINFRAME}, {"dmac", 1, 0, OPT_DMAC},
 		{"vid", 1, 0, OPT_VID}, {"nosplit", 0, 0, OPT_NOSPLIT}, {"dump", 1, 0, OPT_DUMP}, {"flows", 1, 0, OPT_FLOWS},
 		{"pcap", 1, 0, OPT_PCAP}, {"pcap-count", 1, 0, OPT_PCAP_COUNT}, {"hdr", 1, 0, OPT_HDR},
 		{"gpu-id", 1, 0, OPT_GPU_ID}, {"peer-gpu-id", 1, 0, OPT_PEER_GPU_ID},
@@ -190,6 +195,7 @@ static void parse_args(int argc, char **argv)
 		uint8_t d[6] = {0x02, 0, 0, 0, 0x01, (uint8_t)i};
 		memcpy(&g_cfg.peer_mac[i], d, 6);
 	}
+	bool has_seed = false;
 	int o;
 	while ((o = getopt_long(argc, argv, "h", lo, NULL)) != -1) {
 		switch (o) {
@@ -237,6 +243,8 @@ static void parse_args(int argc, char **argv)
 		case OPT_NOSPLIT: g_cfg.split = false; break;
 		case OPT_PROMISC: g_cfg.promisc = true; break;
 		case OPT_ISOLATE: g_cfg.isolate = true; break;
+		case OPT_RANDOM:  g_cfg.rand = true; break;
+		case OPT_SEED:    g_cfg.seed = strtoull(optarg, NULL, 0); has_seed = true; break;
 		case OPT_ONEDMAC: g_cfg.one_dmac = true; break;
 		case OPT_RXSPLIT: g_cfg.rx_split = (int)num(optarg); break;
 		case OPT_RXD:     g_cfg.rxd = (int)num(optarg); break;
@@ -330,6 +338,11 @@ static void parse_args(int argc, char **argv)
 		printf("--tx-cores > 1 只用于 sender 收发分核、空闲 ID 池模式（不能与 --nosplit / --id-seq 同用），且每核分到的 ID 数须不少于每包事务数\n");
 		exit(1);
 	}
+	if (g_cfg.rand && (g_cfg.hdr != HDR_ETH || g_cfg.tx_cores > 1 || g_cfg.r_split)) {
+		printf("--random 只用于 eth 头，不能与 --tx-cores > 1、--r-split 同用\n");
+		exit(1);
+	}
+	if (g_cfg.rand && !has_seed) g_cfg.seed = rte_rdtsc();   /* 未给 --seed：每次不同，启动时打印，可用 --seed 复现 */
 	if (hdr_validate() < 0) exit(1);
 }
 
@@ -404,6 +417,10 @@ int main(int argc, char **argv)
 	       g_cfg.window, g_cfg.pack, g_cfg.beats, g_cfg.burst, g_cfg.vid, g_cfg.sender && g_cfg.split,
 	       g_nb_ports, g_cfg.fpp, (int)ntx, g_cfg.sender ? (g_cfg.id_seq ? " id=seq" : " id=pool") : "");
 	if (g_cfg.rx_split) printf("rx-split=%d：同一 MAC 的请求按网卡随机值均分到 %d 个上下文\n", g_cfg.rx_split, g_cfg.rx_split);
+	if (g_cfg.rand)
+		printf("random: seed=0x%llx（--seed 0x%llx 可复现）；%s\n", (unsigned long long)g_cfg.seed, (unsigned long long)g_cfg.seed,
+		       g_cfg.sender ? "每帧事务数 1~pack、每事务拍数 1~beats 随机，写数据为自校验随机图样，校验读数据；derr = 读数据不对的事务数"
+		                    : "校验写数据，读响应填自校验随机图样；derr = 写数据不对的事务数");
 	if (g_cfg.sender) {
 		bool unset = false;
 		printf("user: tsn 每端口写 / 读各从 0 递增；port");

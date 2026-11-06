@@ -97,6 +97,8 @@ struct config {
 	                                解析后 fpp = N，N 个上下文共用网卡 MAC */
 	bool   id_seq;               /* sender：ID 按顺序分配（旧方式，最老的在途 ID 挡住后面的分配）；默认空闲 ID 池 */
 	uint32_t drop_every;         /* reflector 测试用：每 N 个请求包丢 1 个（0 = 不丢） */
+	bool     rand;                    /* --random：每帧事务数、每事务拍数随机，数据为自校验随机图样，收到后校验（两端都要设） */
+	uint64_t seed;                    /* --seed：随机种子；未设时取启动时的 TSC，启动时打印 */
 	int      e100c_rport;             /* sender：读请求的 user.port（--e100c-rport；-1 = 与写相同，用 --e100c-port） */
 	uint8_t  e100c_port[MAX_PORTS];   /* sender：各 DPDK 端口所接的 E100c ETH 口号 1~4，填入 awuser / aruser 的 user.port（0 = 未设） */
 	/* eth 头 */
@@ -125,6 +127,7 @@ extern volatile bool g_quit;
 struct port_stat {
 	uint64_t tx_pkts, tx_wire_bytes, rx_pkts, rx_wire_bytes;
 	uint64_t txn_done, data_bytes, err, lost, ign, xmac, pcpx, dumped, dropped;
+	uint64_t derr;                                        /* --random：数据校验不对的事务数（sender 查读数据，reflector 查写数据） */
 	uint64_t hist[HIST_N], hist2[HIST2_N];
 	uint64_t rtt_max_ns, rtt_sum_ns, slow;
 	uint64_t rxd_hist[RXD_N], rxd_n, rxd_neg, rxd_bad;   /* --hwts：接收时延直方图、样本数、换算为负、无时间戳 */
@@ -152,6 +155,7 @@ struct tx_lane {
 	uint32_t next_id;                     /* TX 侧写：下一个分配的 ID（--id-seq，只用于单发送核） */
 	uint64_t tx_txn;                      /* TX 侧写：累计发出事务数 */
 	uint64_t next_tx;                     /* TX 侧写：--gap-us 下一次允许发送的 TSC */
+	uint64_t rng;                         /* TX 侧写：--random 的随机数状态 */
 	uint16_t txq;                         /* 发送队列号（初始化后只读） */
 } __rte_cache_aligned;
 
@@ -175,10 +179,12 @@ struct flow_ctx {
 	/* 在途表：发送核置位（各核只碰自己那段 ID）、RX 侧清零 */
 	uint64_t ts[ID_SPACE] __rte_cache_aligned;
 	uint8_t  outst[ID_SPACE];
-	struct tx_lane lane[MAX_TXC];         /* 各发送核；超时回收的 ID 也由 RX 侧还回所属发送核的环 */
+	uint8_t  nb[ID_SPACE];                /* --random：各在途 ID 的拍数（发送核在置 outst 前写，RX 侧在清 outst 前读） */
+	struct tx_lane lane[MAX_TXC];        /* 各发送核；超时回收的 ID 也由 RX 侧还回所属发送核的环 */
 	uint64_t done_txn __rte_cache_aligned;/* RX 侧写：累计完成事务数 */
 	uint64_t lost_txn;                    /* RX 侧写：超时回收的事务数 */
 	uint64_t rc_last;                     /* RX 侧写：上次超时检查的 TSC */
+	uint64_t rng;                         /* reflector 写：--random 读响应数据的随机数状态 */
 } __rte_cache_aligned;
 
 extern struct flow_ctx g_flow[MAX_FLOWS];

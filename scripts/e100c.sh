@@ -1,143 +1,187 @@
 #!/bin/bash
 # axiperf 单机两口测试：一个口发送、一个口反射，两个进程开两个窗口。每条 axiperf 命令执行前完整打印。
+# 详细说明见 docs/E100c_测试手册.md。本帮助按用途分段：
+#   一、命令    二、对口    三、经 E100c 测试（OISA 格式）    四、直连测试    五、SUE 和其他（现在不用）
 #
-#   ./scripts/e100c.sh setup                      准备所有对口的环境（重启后要重做）
+# ======================================================================
+# 一、命令
+# ======================================================================
+#   ./scripts/e100c.sh setup                      准备所有对口的网口（主机重启后做一次）
 #   ./scripts/e100c.sh check                      看所有对口的链路、TC、pause、大页
-#   ./scripts/e100c.sh <id> refl [rw] [选项]      窗口 1：反射端（单写 / 单读不带 rw，读写并发带 rw）
-#   ./scripts/e100c.sh <id> ping [选项]           窗口 2：低速打通（每流在途 4，每包 1 事务 2 拍，打印前 8 帧）
-#   ./scripts/e100c.sh <id> snd write|read|rw|mix W [选项]  窗口 2：跑测试，每流在途 W（E100c 读写并发用 mix：偶数流写、奇数流读，拍数相同）
-#   ./scripts/e100c.sh <id> cnt snd|refl          窗口 3：每秒看网卡计数
-#   ./scripts/e100c.sh <id> cap [帧数]            抓进反射端网口的帧（先停反射端），存 /tmp/refl_in_<名字>.pcap
+#   ./scripts/e100c.sh <对口> refl [选项]         窗口 1：反射端（先起）
+#   ./scripts/e100c.sh <对口> ping [选项]         窗口 2：低速打通（每流在途 4，每帧 1 事务 2 拍，打印前 8 帧）
+#   ./scripts/e100c.sh <对口> snd write|read|mix <每流在途> [选项]   窗口 2：跑测试
+#   ./scripts/e100c.sh <对口> cnt snd|refl        窗口 3：每秒看发送口 / 反射口的网卡计数
+#   ./scripts/e100c.sh <对口> cap [帧数]          抓进反射口的帧（先停反射端），存 /tmp/refl_in_<名字>.pcap
+#   ./scripts/e100c.sh help                       看本帮助
 #
-# <id> 是请求里的 user.port（E100c 的 port id），每个 id 对应一对口：
-#   0  ens108np0 → ens110np0（die1 chip0 → die0 chip2）
-#   1  ens111np0 → ens106np0（die1 chip1 → die0 chip3）
-#   2  ens103np0 → ens101np0（die1 chip2 → die0 chip0；已做双向写和小包验证）
-#   3  ens114np0 → ens119np0（die1 chip3 → die0 chip1）
-# 其他对口用名字代替 id：
-#   r0~r3    id 0~3 的反方向（如 r0：ens110np0 → ens108np0），和正方向一起跑时两边都加 --iso；最多 -f 4、-r 4
-#   b2       id 2 的反方向，供单对口双向 8 流、8 核反射使用；不能与 id 0、1 并发（借用其 NUMA0 核）
-#   b1       id 1 的反方向，8 流、8 核反射（两口分在交换芯片 6e、da 下）；不能与 id 2、3、b2 并发
-#   y0、y3、w2  id 0、3、2 的别名（报告里用过的名字）
-#   z1、v3   交叉路由 ens111 → ens110 和它的反方向（z1 与直连 d1 网卡、核相同，用来比时延）；不与 id 0、1、3 并发
-#   e100c_r  是 b2 的兼容别名；e100c_r1、e100c2、x1、xa、xb 是旧接线专用，已停用
-#   direct   ens102np0 发送 → 直连 → ens110np0 反射
-#   d0~d2    网线直连：d0 = ens108 → ens103，d1 = ens111 → ens110，d2 = ens106 → ens101（拔掉 E100c 的线，两口直接对接）
+# snd 的操作：write 只写；read 只读；mix 读写混跑（偶数流写、奇数流读，-f 8 即 4 写 + 4 读）。
+# 每流在途：写至少 2，读至少 4，常用 200。
 #
-# 选项（可放在命令后任意位置，其余参数原样传给 axiperf）：
-#   -f N     发送端流数，N 为 2 的幂 [snd 4，ping 1，--sue 1]。mix 时是读写合计：偶数号流写、奇数号流读，-f 8 即 4 流写 + 4 流读
+# ======================================================================
+# 二、对口
+# ======================================================================
+# 路由规则：从 die X 进、user.port = p 的请求，从另一个 die 的 chip (p xor 2) 出去。
+# 网口接线：die1 chip0~3 = ens108、ens111、ens103、ens114；die0 chip0~3 = ens101、ens119、ens110、ens106。
+#
+# 经 E100c（主对口，die1 发 → die0 反射）：
+#   0   ens108 → ens110（die1 chip0 → die0 chip2），user.port 0
+#   1   ens111 → ens106（die1 chip1 → die0 chip3），user.port 1
+#   2   ens103 → ens101（die1 chip2 → die0 chip0），user.port 2
+#   3   ens114 → ens119（die1 chip3 → die0 chip1），user.port 3（ens114 已掉出 PCIe，暂不可用）
+# 经 E100c（反方向，die0 发 → die1 反射，双向打流用）：
+#   r0~r3  0~3 的反方向（如 r0：ens110 → ens108）；和正方向一起跑时两边都加 --iso；最多 -f 4、-r 4
+#   b1     1 的反方向，8 流 + 8 核反射；不能和 2、3、b2 同时跑
+#   b2     2 的反方向，8 流 + 8 核反射；借用 0、1 的核，不能和它们同时跑
+# 经 E100c（交叉路由）：
+#   z1     ens111 → ens110（die1 chip1 → die0 chip2，user.port 0）；网卡和核与直连 d1 相同，比时延用；不和 0、1、3 同时跑
+#   v3     z1 的反方向
+# 别名：y0、w2、y3 = 0、2、3；e100c_r = b2
+#
+# 直连（网线直接对接，不经过 E100c，见第四段）：
+#   d0  ens108 ↔ ens103    d1  ens111 ↔ ens110    d2  ens106 ↔ ens101
+#
+# 已停用（旧接线）：e100c_r1、e100c2、x1、xa、xb、direct（ens102 已不存在）
+#
+# ======================================================================
+# 三、经 E100c 测试（OISA 格式）
+# ======================================================================
+# 脚本已自动填好的 axiperf 参数（不用再写；要改值改本文件末尾“环境配置”里的变量）：
+#   发送端：--ethertype 0x88ee --min-frame 0 --timeout-us 0 --dmac 0,$E100C_MAC1 --one-dmac --smac $E100C_SMAC
+#           --e100c-port 0,<user.port> --vid 0 --burst 16 --rpack 4（读、混跑的默认值）--brief
+#   反射端：--ethertype 0x88ee --min-frame 0 --b-port <按对口> --b-tag 0 --r-user 0 --b-pack 1
+#           --rx-split <核数> --rxd 4096 --burst 16 --brief（--iso 时改为 --flows <核数> --isolate）
+#   --timeout-us 必须为 0：E100c 的事务 ID 只在收到响应后释放，超时重发会把 ID 耗尽。
+#   --b-pack 必须为 1：OISA 头只有一个 tag_id，一帧只能放 1 个写响应。
+#
+# 脚本选项（可放在命令后任意位置）：
+#   -f N     发送端流数，2 的幂 [snd 4，ping 1]；mix 时是读写合计
 #   -t SEC   运行秒数 [snd 20，ping 5，ping 带 -n 时 3；0 = 一直跑]
+#   -r N     反射端核数 1、2、4、8、16 [4]；1 = 单队列单核，响应严格按收到的顺序发出。混跑 8 核比 4 核高约 16%
+#   -s       发送端接收核不和发送核共用物理核。读、混跑要加；写不要加（加了约 105G → 87G）
+#   --iso    发送端、反射端都加 --isolate：同一网口可同时跑本方向发送端和反方向反射端（双向打流）
 #   -n N     ping 只发 N 帧（1~511）
-#   -r N     反射端核数 1、2、4、8、16 [4]。1 = 单队列单核，响应严格按收到的顺序发出。
-#            读写混跑时 8 核比 4 核高约 16%（110G → 128G）；16 核反而更低。只读、只写 4 核和 8 核相同。
-#            旧接线下曾观察到两对同时用 -r 8 掉速；新接线尚未验证
-#   -s       接收核不与发送核共用物理核（读的性能配置要加）
-#   -v       完整输出（每流结果、MAC、ign、xmac、pcpx）；默认精简输出
-#   --txc N  发送端每上下文 N 个发送核 [1]
-#   --sue    发送端改用 SUEv1-标准ETH 头（事务头在第 20 字节；反射端只有单流，本端 GPU ID 取 SUE_DST）
-#   --iso    发送端、反射端都加 --isolate：同一网口可同时跑本方向的发送端和反方向的反射端（双向打流）；反射端多核按请求 tag 低位分队列
-#   --dry-run 只打印 ping / snd / refl 的命令，不运行 sudo 或 axiperf
+#   -v       完整输出（每流结果和调试列）；默认精简输出
+#   --txc N  发送端每条流 N 个发送核 [1]（不能和 --id-seq 同用）
+#   --dry-run 只打印 ping / snd / refl 的命令，不执行
 #
-# 常用的 axiperf 参数（直接加在命令后面）：
-#   发送端：--beats N  每事务拍数      --pack N  写每帧事务数      --rpack N  读每帧事务数（最多 4）
-#           --count N  只发 N 帧       --gap-us N  每隔 N 微秒发 1 帧   --id-seq  ID 按顺序分配（读的性能更高）
-#           --dump N   打印前 N 帧     --pcap F --pcap-count N  抓包存到文件 F，最多 N 帧
-#           --ar-user-low X  读请求 aruser[29:0]。默认按 --beats 自动填 sect_mask（bit 27:20，地址 0 时 1~4 拍为 0x03、0x0F、0x3F、0xFF）；
-#                            填 0 可复现多拍读卡死（累计几十个响应后卡死，要给 E100c 重新上下电才能恢复）
-#   反射端：读响应拍数默认取自请求；--r-beats N  固定回 N 拍
-#   调试读响应的填法：--r-user X  --r-len-data  --r-pack-beats  --r-echo-aruser N  --r-split N
-#   全部参数看 ./axiperf --help
+# 测试时加在命令后面的 axiperf 参数（脚本不认识的参数原样传给 axiperf）：
+#   --beats N        每事务拍数 1~4（每拍 64B）
+#   --pack N         写每帧事务数（pack × beats ≤ 8）
+#   --rpack N        读每帧事务数 1~4
+#   --id-seq         ID 按顺序分配（读的性能更高，建议都加）
+#   --e100c-rport N  只把读请求的 user.port 改成 N；mix 时读写走不同出口
+#   --count N        每流只发 N 帧         --gap-us N   每 N 微秒最多发 1 帧（慢速抓包，避免 E100c 拼包）
+#   --dump N         打印前 N 帧           --pcap F --pcap-count N   抓包存到文件 F，最多 N 帧
+#   --hwts           统计网卡收到 → CPU 取包的时延（性能测试时不要加）
+#   --random         随机测试，反射端、发送端都要加：每帧事务数 1~--pack / --rpack、每事务拍数 1~--beats 随机，
+#                    数据为自校验随机图样；反射端查写数据、发送端查读数据，错误数在输出最后一列 derr。
+#                    发送端 CPU 跑满，写约 20G、读约 40G。--seed N 复现同一个随机序列（种子在启动时打印）
 #
-# 先准备环境（主机重启后做一次）：
-#   ./scripts/e100c.sh setup
-#   ./scripts/e100c.sh check
+# 随机测试（数据校验；反射端的 --time 要比发送端长，见下面“测试方法”）：
+#   ./scripts/e100c.sh 2 refl --random --time 60
+#   ./scripts/e100c.sh 2 snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 4 --beats 4 --id-seq --random
 #
-# 写，单对口，性能配置（窗口 1 跑反射端，窗口 2 跑发送端，下同）：
-#   ./scripts/e100c.sh 1 refl
-#   ./scripts/e100c.sh 1 snd write 200 --pack 2 --beats 4
+# E100c 调试参数（排查响应格式、复现问题用，测性能不用）：
+#   发送端：--ar-user-low X  读请求 aruser[29:0]；默认按拍数自动填 sect_mask（bit 27:20，1~4 拍为 0x03、0x0F、0x3F、0xFF）。
+#                            填 0 会复现多拍读卡死，E100c 要重新上下电
+#           --req-b1 X  请求 OISA 头第 1 字节     --req-tag 1  请求的 tag 填 AXI ID
+#   反射端：--r-beats N  读响应固定回 N 拍    --r-user X  读响应 ruser    --r-echo-aruser N  ruser 取自请求
+#           --r-len-data  --r-pack-beats  --r-split N  改读响应的 OISA 字段 / 拆帧    --drop-every N  每 N 个请求丢 1 个
 #
-# 写，低速打通，只发 10 帧并打印：
+# 准备（主机重启后做一次；E100c 上电后的初始化见手册 3.1 节）：
+#   bash /home/mx/mengx/after_reboot.sh          # 或 ./scripts/e100c.sh setup && ./scripts/e100c.sh check
+#
+# 打通（新接线、重新上电后先做；只发 10 帧并打印）：
 #   ./scripts/e100c.sh 1 refl -r 1 -v
 #   ./scripts/e100c.sh 1 ping -n 10
 #
-# 读 1 拍，单对口，性能配置：
+# 写（4 流 × 200，约 106G）：
 #   ./scripts/e100c.sh 1 refl
-#   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq
+#   ./scripts/e100c.sh 1 snd write 200 -t 30 --pack 2 --beats 4 --id-seq
 #
-# 读 1 拍，单流慢速，发 100 帧，看每流结果并抓包：
-#   ./scripts/e100c.sh 1 refl -r 1 -v --pcap /tmp/r.pcap --pcap-count 2000
-#   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 5 --rpack 1 --beats 1 --count 100 --gap-us 1000 --id-seq --pcap /tmp/s.pcap --pcap-count 2000
-#
-# 读 2 拍，单对口，性能配置：
+# 读（4 拍约 110G；2 拍用 --rpack 2 --beats 2；1 拍用 --rpack 4 --beats 1）：
 #   ./scripts/e100c.sh 1 refl
-#   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 1 --beats 2 --id-seq
+#   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 2 --beats 4 --id-seq
 #
-# 读 4 拍，单对口，性能配置：
-#   ./scripts/e100c.sh 1 refl
-#   ./scripts/e100c.sh 1 snd read 200 -s -t 30 --rpack 1 --beats 4 --id-seq
-#
-# 读 4 拍，单流慢速，每 100ms 发 1 帧（不会拼包），发 80 帧并抓包：
-#   ./scripts/e100c.sh 1 refl -r 1 -v --pcap /tmp/r.pcap --pcap-count 4000
-#   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 14 --rpack 1 --beats 4 --count 80 --gap-us 100000 --id-seq --pcap /tmp/s.pcap --pcap-count 4000
-#
-# 四对口并发（各对口的反射端都起来后再起发送端；反射端用默认 4 核）：
-#   for i in 0 1 2 3; do ./scripts/e100c.sh $i refl --time 50 & done; sleep 6
-#   写 4 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd write 200 -t 30 --pack 2 --beats 4 --id-seq & done; wait
-#   读 4 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 2 --beats 4 --id-seq & done; wait
-#   读 1 拍：  for i in 0 1 2 3; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 4 --beats 1 --id-seq & done; wait
-#   读写混跑：for i in 0 1 2 3; do ./scripts/e100c.sh $i snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq & done; wait
-#   新接线下的四对口并发性能尚未验证；以上示例使用 4 核反射端
-#
-# 测试方法：
-#   - 单对口每次只改一个变量（拍数、每帧事务数、流数、窗口、反射端核数），其他保持“4 流 × 200，-s，--id-seq”。
-#   - 看吞吐时同时看 p50：在途翻倍时延也翻倍、吞吐不变，说明是在前面排队，加窗口和流数没用。
-#   - 反射端的 busy% 会低估负载（显示 70% 时可能已是瓶颈），判断是否 CPU 瓶颈要加核对比，不要只看 busy%。
-#   - 慢速抓包用 -f 1 -r 1 --gap-us 100000，避免 E100c 拼包；拼包时按帧数推算会出错。
-#   - 停反射端只发一次 Ctrl-C；连按两次会强制退出，抓包文件写不完整。
-#   - 日志和抓包放 /home/mx/mengx，不要放 /tmp（主机重启会清空）。
-#   - 每次测完看 err、lost 和网口计数（cnt）：都为 0 才算有效。
-#
-# 读写组合扫描（单口逐对 + 四口并发，每组 30 秒约 1 小时 50 分；中断后重跑同一命令会续跑，结果在 summary.csv）：
-#   setsid nohup ./scripts/e100c_matrix.sh /home/mx/mengx/axi_pcap/matrix 30 > /home/mx/mengx/axi_pcap/matrix.out 2>&1 < /dev/null &
-#
-# 读写并发，单对口，4 拍，2 流写 + 2 流读（读写各 400 在途）：
-#   ./scripts/e100c.sh 1 refl
-#   ./scripts/e100c.sh 1 snd mix 200 -s -t 30 --pack 2 --rpack 1 --beats 4 --id-seq
-#
-# 读写并发，单对口，4 拍，4 流写 + 4 流读（读写各 800 在途，和单独只读、只写的资源相同；反射端 8 核约 128G，4 核约 110G）：
+# 读写混跑（4 写 + 4 读；反射端 4 核约 105G，8 核约 128G）：
 #   ./scripts/e100c.sh 1 refl -r 8
 #   ./scripts/e100c.sh 1 snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq
 #
-# 双向打写示例（id 0 和 r0，四个进程分开窗口）：
-#   ./scripts/e100c.sh 0 refl --iso -r 4
-#   ./scripts/e100c.sh r0 refl --iso -r 4
-#   ./scripts/e100c.sh 0 snd write 200 -f 4 -t 30 --pack 2 --beats 4 --id-seq --iso
-#   ./scripts/e100c.sh r0 snd write 200 -f 4 -t 30 --pack 2 --beats 4 --id-seq --iso
+# 读 4 拍，单流慢速，每 100ms 发 1 帧，发 80 帧并抓包：
+#   ./scripts/e100c.sh 1 refl -r 1 -v --pcap /home/mx/mengx/r.pcap --pcap-count 4000
+#   ./scripts/e100c.sh 1 snd read 4 -f 1 -v -t 14 --rpack 1 --beats 4 --count 80 --gap-us 100000 --id-seq --pcap /home/mx/mengx/s.pcap --pcap-count 4000
 #
-# 单对口双向打写（ens103 ↔ ens101，每方向 8 流 × 100、反射 8 核；b2 借用其他对口的核）：
-#   ./scripts/e100c.sh 2 refl --iso -r 8
+# 多对口并发（各对口的反射端都起来后再起发送端）：
+#   for i in 0 1 2; do ./scripts/e100c.sh $i refl --time 50 & done; sleep 6
+#   写：  for i in 0 1 2; do ./scripts/e100c.sh $i snd write 200 -t 30 --pack 2 --beats 4 --id-seq & done; wait
+#   读：  for i in 0 1 2; do ./scripts/e100c.sh $i snd read 200 -s -t 30 --rpack 2 --beats 4 --id-seq & done; wait
+#   混跑：for i in 0 1 2; do ./scripts/e100c.sh $i snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq & done; wait
+#
+# 双向写（1 和 r1，四个进程分开窗口；每方向约 79G）：
+#   ./scripts/e100c.sh 1  refl --iso -r 4
+#   ./scripts/e100c.sh r1 refl --iso -r 4
+#   ./scripts/e100c.sh 1  snd write 200 -f 4 -t 30 --pack 2 --beats 4 --id-seq --iso
+#   ./scripts/e100c.sh r1 snd write 200 -f 4 -t 30 --pack 2 --beats 4 --id-seq --iso
+#
+# 单对口双向写，每方向 8 流 × 100、反射 8 核（2 和 b2）：
+#   ./scripts/e100c.sh 2  refl --iso -r 8
 #   ./scripts/e100c.sh b2 refl --iso -r 8
-#   ./scripts/e100c.sh 2 snd write 100 -f 8 -t 30 --pack 2 --beats 4 --id-seq --iso
+#   ./scripts/e100c.sh 2  snd write 100 -f 8 -t 30 --pack 2 --beats 4 --id-seq --iso
 #   ./scripts/e100c.sh b2 snd write 100 -f 8 -t 30 --pack 2 --beats 4 --id-seq --iso
 #
-# 4 对口双向打写：8 个方向同时跑（合计约 512G，受主机核数限制只能 4 流 + 4 核）：
-#   for i in 0 1 2 3 r0 r1 r2 r3; do ./scripts/e100c.sh $i refl --iso -r 4 --time 50 & done; sleep 10
-#   for i in 0 1 2 3 r0 r1 r2 r3; do ./scripts/e100c.sh $i snd write 200 -f 4 -t 30 --pack 2 --beats 4 --id-seq --iso & done; wait
+# 一个口进、两个口出（ens108 混跑：写 → ens110，读 → ens106）：
+#   ./scripts/e100c.sh 0 refl    （另一个窗口）./scripts/e100c.sh 1 refl
+#   ./scripts/e100c.sh 0 snd mix 200 -f 8 -s -t 30 --pack 2 --rpack 2 --beats 4 --id-seq --e100c-rport 1
 #
-# 看网卡计数（另开窗口）：
-#   ./scripts/e100c.sh 1 cnt snd
-#   ./scripts/e100c.sh 1 cnt refl
+# 读写组合扫描（单口逐对 + 并发，每组 30 秒；中断后重跑同一命令会续跑，结果在 summary.csv）：
+#   setsid nohup ./scripts/e100c_matrix.sh /home/mx/mengx/axi_pcap/matrix 30 > /home/mx/mengx/axi_pcap/matrix.out 2>&1 < /dev/null &
 #
-# 看帮助：./scripts/e100c.sh help
+# 测试方法：
+#   - 单对口每次只改一个变量（拍数、每帧事务数、流数、窗口、反射端核数），其他保持“4 流 × 200，--id-seq”。
+#   - 看吞吐时同时看 p50：在途翻倍时延也翻倍、吞吐不变，说明在前面排队，加窗口和流数没用。
+#   - 反射端 busy% 是最忙那个核的值，会低估负载；判断 CPU 瓶颈要加核对比。
+#   - 停反射端只按一次 Ctrl-C；连按两次会强制退出，抓包文件写不完整。
+#   - 吞吐掉到约 1G、时延约 1 ms（塌陷）时不要强制杀发送端，会把 E100c 入口卡住。
+#   - 反射端不能比发送端先退出：E100c 里没回响应的请求会把这条路径卡住（发出去、收不到），只能重新上电。
+#     先停发送端；反射端用 --time 时要比发送端的 -t 长。
+#   - 日志和抓包放 /home/mx/mengx，不要放 /tmp（主机重启会清空）。
+#   - 每次测完看 err、lost 和网口计数（cnt）：都为 0 才算有效。
+#
+# ======================================================================
+# 四、直连测试（网线直连，不经过 E100c）
+# ======================================================================
+# 对口 d0~d2。脚本对直连对口不加 E100c 参数，改用标准以太网帧（802.1Q 标签 + 802.3 Length）：
+#   发送端：--dmac 0,<反射口真实 MAC>（脚本从网口读取）--one-dmac --vid 0，--timeout-us 用默认 10000
+#   反射端：--rx-split <核数> --b-pack 16（写响应可以合并）
+#   不用 --ethertype、--e100c-port、--b-port、--b-tag、--r-user、--iso
+# 直连才能用的：
+#   snd rw / refl rw   同一 MAC 同时读写，按 VLAN 的 PCP 分读写队列（经 E100c 时帧没有 VLAN 标签，程序会拒绝，用 mix）
+#   --no-len           帧头不带 Length，事务头紧跟 802.1Q 标签；两端都加
+#   --promisc          强制混杂接收
+# 例：
+#   ./scripts/e100c.sh d1 refl
+#   ./scripts/e100c.sh d1 snd write 200 -t 30 --pack 2 --beats 4 --id-seq
+#
+# ======================================================================
+# 五、SUE 和其他（现在的测试不用）
+# ======================================================================
+#   --sue    发送端改用 SUEv1 帧头（事务头在第 20 字节；反射端只有单流，本端 GPU ID 取 SUE_DST）；值在环境配置的 SUE_* 里
+#   axiperf 的 --hdr sue --gpu-id --peer-gpu-id --sue-ethertype --sue-format --sue-pkttype 由 --sue 自动填
+#   --nosplit  每条流由同一个核收发（默认收发分核）
+#   全部参数看 ./axiperf --help
 #
 # 改环境时改下面的值：
-VID=0                           # 两端相同（帧里仍带 802.1Q 标签，PCP 用来区分 VC）
-E100C_MAC1=c0:c0:00:a0:00:00    # 请求 DMAC（E100c 样例值，10-30 实测不校验）
-E100C_SMAC=00:00:00:00:04:01    # 发送端 SMAC，也是 OISA 头第 6~11 字节的初值
-E100C_MAC2=                     # e100c2：E100c 上接 ens111np0 那个口的 MAC
-E100C_PORT2=                    # e100c2：ens111np0 所接 E100c 的 ETH 口号 1~4
+# ---- 经 E100c 测试 ----
+E100C_MAC1=c0:c0:00:a0:00:00    # 请求的目的 MAC（E100c 样例值，实测不校验）
+E100C_SMAC=00:00:00:00:04:01    # 发送端源 MAC，也是 OISA 头第 6~11 字节的初值
+MIN_FRAME=0 B_PORT=0 B_TAG=0 R_USER=0   # 反射端默认值（B_PORT 按对口在下面覆盖）；命令行加 --min-frame / --b-port / --b-tag / --r-user 可再覆盖
+# ---- 经 E100c 和直连都用 ----
+VID=0                           # 两端相同；直连时帧里带 802.1Q 标签（PCP 区分 VC），经 E100c 时不起作用
+# ---- 其他（已停用的 e100c2 对口、SUE 试验） ----
+E100C_MAC2=                     # e100c2（已停用）：E100c 上接 ens111np0 那个口的 MAC
+E100C_PORT2=                    # e100c2（已停用）：ens111np0 所接 E100c 的 ETH 口号 1~4
 SUE_DST=0xc0c0 SUE_SRC=1 SUE_ET=0x88ee SUE_FMT=0 SUE_PT=0   # --sue：目的 / 源 GPU ID、EtherType、Format、PktType
-MIN_FRAME=0 B_PORT=0 B_TAG=0 R_USER=0   # 反射端默认值，命令行加 --min-frame / --b-port / --b-tag / --r-user 可覆盖
 
 usage() { sed -n '2,/^# 改环境时/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 

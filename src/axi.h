@@ -160,6 +160,88 @@ static inline uint16_t axi_b_build(uint8_t *p, const uint32_t *ids, int k)
 	return (uint16_t)(k * B_RSP);
 }
 
+/*
+ * --random：随机长度、自校验数据
+ *   每个 64B 数据拍：第 0 个字的低 8 位 = (拍序号 << 4) | 本事务拍数，高 24 位随机；
+ *   后面 15 个字是从第 0 个字开始的 xorshift32 序列。收端只看本拍就能校验，
+ *   能发现数据被改、拍序错乱、拍数不对、补 0 或截断。
+ */
+static inline uint64_t rng_next(uint64_t *s)            /* xorshift64*，状态不能为 0 */
+{
+	uint64_t x = *s;
+	x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+	*s = x;
+	return x * 0x2545F4914F6CDD1DULL;
+}
+
+static inline uint64_t rng_seed(uint64_t seed, uint64_t salt)   /* splitmix64：每个核一个不同的初始状态 */
+{
+	uint64_t z = seed + 0x9E3779B97F4A7C15ULL * (salt + 1);
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+	z ^= z >> 31;
+	return z ? z : 1;
+}
+
+static inline uint32_t xs32(uint32_t x) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return x; }
+
+static inline void rand_beat_fill(uint8_t *p, uint32_t r, uint32_t j, uint32_t nb)
+{
+	uint32_t x = (r & ~0xFFu) | (j << 4) | nb;           /* nb ≥ 1，所以 x 不为 0，xorshift 序列不会全 0 */
+	put_be32(p, x);
+	for (int i = 1; i < BEAT / 4; i++) { x = xs32(x); put_be32(p + 4 * i, x); }
+}
+
+static inline bool rand_beat_ok(const uint8_t *p, uint32_t j, uint32_t nb)
+{
+	uint32_t x = get_be32(p);
+	if ((x & 0xFF) != ((j << 4) | nb)) return false;
+	for (int i = 1; i < BEAT / 4; i++) { x = xs32(x); if (get_be32(p + 4 * i) != x) return false; }
+	return true;
+}
+
+/* 一个事务的 nb 拍数据是否都对：拍数要等于请求的拍数 want */
+static inline bool rand_data_ok(const uint8_t *d, uint32_t nb, uint32_t want)
+{
+	if (nb != want) return false;
+	for (uint32_t j = 0; j < nb; j++) if (!rand_beat_ok(d + j * BEAT, j, nb)) return false;
+	return true;
+}
+
+/* 在 p 处写一个完整的请求事务（头 + 写数据），拍数 beats 逐事务给；返回写入的字节数 */
+static inline uint16_t axi_txn_rand(uint8_t *p, bool read, uint32_t id, int beats, uint32_t port, uint32_t tsn, uint64_t *rng)
+{
+	memset(p, 0, AW_HDR);
+	if (!read) {
+		put_be32(p + 12, 6);                                 /* awsize = 110 */
+		axi_req_set(p, false, id, beats, port, tsn);
+		for (int j = 0; j < beats; j++) rand_beat_fill(p + AW_HDR + j * BEAT, (uint32_t)rng_next(rng), (uint32_t)j, (uint32_t)beats);
+		return (uint16_t)(AW_HDR + beats * BEAT);
+	}
+	/* 读：sect_mask 按本事务拍数填（--ar-user-low 指定时用指定值） */
+	const uint32_t aru = (g_cfg.ethertype && !g_cfg.has_ar_user_low) ? ((1u << (2 * beats)) - 1) << 20 : g_cfg.ar_user_low;
+	const uint64_t u = axi_user_tp(port, tsn) << AR_USER_LSB;
+	put_be32(p, axi_w0_ar(id) | (uint32_t)(u >> 42));
+	put_be32(p + 4, (uint32_t)(u >> 10) | ((aru >> 10) & 0xFFFFF));
+	put_be32(p + 8, (aru & 0x3FF) << 22);
+	put_be32(p + 12, ((uint32_t)(beats - 1) << 3) | 6);    /* arlen，arsize = 110 */
+	return AR_HDR;
+}
+
+/* --random（reflector）：校验写请求的数据拍，返回数据不对的事务数（带 strobe 的 FT_WR 不校验） */
+static inline int axi_aw_check(const uint8_t *p, uint16_t plen, int k)
+{
+	int bad = 0; uint16_t off = 0;
+	for (int t = 0; t < k && off + AW_HDR <= plen; t++) {
+		const uint32_t w0 = get_be32(p + off), b = axi_beats(w0);
+		if (axi_ft(w0) != FT_WRFULL) { off += (uint16_t)(AW_HDR + b * (WSTRB_LEN + BEAT)); continue; }
+		if (off + AW_HDR + b * BEAT > plen) { bad++; break; }
+		if (!rand_data_ok(p + off + AW_HDR, b, b)) bad++;
+		off += (uint16_t)(AW_HDR + b * BEAT);
+	}
+	return bad;
+}
+
 /* 解析读请求 payload（reflector 用），输出 ids 与各自拍数 */
 static inline int axi_ar_parse(const uint8_t *p, uint16_t plen, uint16_t ntxn, uint32_t *ids, uint32_t *beats, uint64_t *aruser, bool *bad)
 {

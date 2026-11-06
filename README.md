@@ -116,6 +116,8 @@ echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ld
 | `--b-tag` | 0 | reflector：`--ethertype` 时写响应 EtherType 后的 16 位 |
 | `--min-frame` | 0 | 请求、响应都补 0 到 N 字节，不含 FCS（线上 N+4）；0 = 不补。E100c 要求至少 512 字节（含 FCS），即 508 |
 | `--count` | 0 | sender：每个发送上下文发满 N 个请求包后不再发，进程仍运行到 `--time` 结束；0 = 不限。窗口小于 N 时，收不到响应就发不满 |
+| `--random` | 关 | 随机测试，两端都要设。sender 每帧事务数在 1~`--pack`（读为 `--rpack`）、每事务拍数在 1~`--beats` 间随机（写帧总拍数 ≤ 8），逐帧现场构造；每个 64B 数据拍为自校验图样（首字低 8 位 = 拍序号 × 16 + 本事务拍数，其余 15 个字由首字按 xorshift32 推出）。reflector 校验写数据、读响应填随机图样；sender 校验读数据并核对拍数。数据不对的事务数在输出最后一列 `derr`；读拍数和请求不同但数据完好时计入 `err`。只用于 eth 头，不能与 `--tx-cores` > 1、`--r-split` 同用；sender CPU 跑满，吞吐低于普通模式 |
+| `--seed` | TSC | `--random` 的随机种子，启动时打印，sender 用同一个值可复现同样的随机序列 |
 | `--brief` | 关 | 精简输出，多流时好看：每秒只打所有流、所有端口合并的结果，rw / mix 分 w、r、all 三行。列：txL2G / rxL2G（二层速率，帧长，不含 FCS、前导码、帧间隔）、dataG、txnM/s、RTT p50 / p99 / p999（本次间隔，退出时为全程）、maxus（累计最大）、err、lost、bad（xmac + pcpx）、miss（imissed + nombuf，只在 all 行）、busy%（最忙核）。启动时也不打每流绑核行 |
 | `--id-seq` | 关 | sender：ID 按顺序分配（旧方式）。默认用空闲 ID 池：RX 核把完成的 ID 放回环，TX 核从环里取，完成即可复用，不会被最老的在途 ID 挡住（顺序分配时单流平均在途约 447/511）。两种方式都在 9 bit ID 空间内，任一时刻同一 ID 只在途一次 |
 | `--timeout-us` | 10000 | sender：事务超时回收并计入 lost；0 为不回收（丢一个包该流就会停住） |

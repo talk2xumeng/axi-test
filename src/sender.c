@@ -59,6 +59,16 @@ static inline uint32_t id_resolve(const struct flow_ctx *c, uint32_t id)
 	return id;
 }
 
+/* --random 读响应：两个逻辑 ID 都在途且拍数不同时，按响应的拍数挑（拍数相同时同 id_resolve，挑哪个都不影响数据校验） */
+static inline uint32_t id_resolve_rd(const struct flow_ctx *c, uint32_t id, uint32_t nb)
+{
+	const uint32_t hi = id + WIRE_IDS;
+	if (id < WIRE_IDS && __atomic_load_n(&c->outst[hi], __ATOMIC_ACQUIRE) && __atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE) &&
+	    c->nb[id] != c->nb[hi])
+		return c->nb[hi] == nb ? hi : id;
+	return id_resolve(c, id);
+}
+
 /* 发一批请求：受窗口与 ID 占用约束。返回发出的包数 */
 static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_stat *s)
 {
@@ -127,6 +137,90 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 	return n;
 }
 
+/*
+ * --random：逐帧现场构造请求（不用预填模板的 payload），比 tx_step 慢。
+ *   每帧事务数在 1..--pack（读为 --rpack）间随机，每个事务拍数在 1..--beats 间随机，
+ *   写帧总拍数不超过 8；写数据为自校验随机图样。各 ID 的拍数记在 c->nb，收到响应时用来核对读数据和统计。
+ *   只支持每条流 1 个发送核（--tx-cores 1）。
+ */
+static int tx_step_rand(struct flow_ctx *c, struct tx_lane *L, struct port_stat *s)
+{
+	struct rte_mbuf *tx[MAX_BURST];
+	if (g_cfg.gap_cyc && rte_rdtsc() < L->next_tx) return 0;
+	const bool rd = c->read, seq = g_cfg.id_seq;
+	const int pmax = req_pack(rd), bmax = g_cfg.beats;
+	const uint16_t hl = hdr_len();
+	const uint32_t step = id_step();
+	int nmax = g_cfg.gap_cyc ? 1 : g_cfg.burst;
+	if (g_cfg.count) {
+		if (s->tx_pkts >= g_cfg.count) return 0;
+		if ((uint64_t)nmax > g_cfg.count - s->tx_pkts) nmax = (int)(g_cfg.count - s->tx_pkts);
+	}
+	int avail;                                   /* 还能发出的事务数 */
+	if (seq) avail = (int)((uint64_t)g_cfg.window - (L->tx_txn - __atomic_load_n(&c->done_txn, __ATOMIC_ACQUIRE)
+	                                                            - __atomic_load_n(&c->lost_txn, __ATOMIC_ACQUIRE)));
+	else avail = (int)(__atomic_load_n(&L->idq_head, __ATOMIC_ACQUIRE) - L->idq_tail);
+	if (avail <= 0) return 0;
+
+	const uint64_t t_s = rte_rdtsc();
+	if (g_cfg.gap_cyc) L->next_tx = t_s + g_cfg.gap_cyc;
+	const uint32_t uport = (rd && g_cfg.e100c_rport >= 0) ? (uint32_t)g_cfg.e100c_rport : g_cfg.e100c_port[c->port];
+	uint32_t next_id = L->next_id, tail = L->idq_tail;
+	const uint64_t now = rte_rdtsc();
+	uint64_t ntxn = 0, wire = 0;
+	int n = 0;
+	for (; n < nmax && avail > 0; n++) {
+		/* 先定本帧的事务数和各事务拍数 */
+		int k = 1 + (int)(rng_next(&L->rng) % (uint64_t)pmax), bl[MAX_TXN], used = 0, j;
+		if (k > avail) k = avail;
+		for (j = 0; j < k; j++) {
+			int b = 1 + (int)(rng_next(&L->rng) % (uint64_t)bmax);
+			if (!rd) { if (used >= MAX_BEATS) break; if (used + b > MAX_BEATS) b = MAX_BEATS - used; used += b; }
+			bl[j] = b;
+		}
+		k = j;
+		if (seq)                                 /* --id-seq：接下来 k 个 ID 须空闲 */
+			for (j = 0; j < k; j++)
+				if (__atomic_load_n(&c->outst[(next_id + (uint32_t)j * step) & (ID_SPACE - 1)], __ATOMIC_ACQUIRE)) { k = j; break; }
+		if (k <= 0) break;
+		struct rte_mbuf *m = rte_pktmbuf_alloc(c->tmpl_pool);   /* 模板里有帧头，payload 现场写 */
+		if (!m) break;
+		uint8_t *f = rte_pktmbuf_mtod(m, uint8_t *), *p = f + hl;
+		uint32_t tsn = __atomic_fetch_add(&g_tsn[c->port][rd].v, (uint32_t)k, __ATOMIC_RELAXED);
+		for (j = 0; j < k; j++) {
+			uint32_t id;
+			if (seq) { id = next_id; next_id = (id + step) & (ID_SPACE - 1); }
+			else id = L->idq[tail++ & (ID_SPACE - 1)];
+			if (j == 0 && g_cfg.req_tag) put_be16(f + 6, (uint16_t)(id & (WIRE_IDS - 1)));
+			p += axi_txn_rand(p, rd, id & (WIRE_IDS - 1), bl[j], uport, tsn++, &L->rng);
+			c->nb[id] = (uint8_t)bl[j];
+			c->ts[id] = now;
+			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
+		}
+		const uint16_t plen = (uint16_t)(p - (f + hl));
+		uint16_t len = (uint16_t)(hl + plen);
+		if (g_cfg.ethertype) {                   /* OISA 请求头：length、packing_num 按本帧改，source id 不变 */
+			put_be16(f + 2, len);
+			put_be16(f + 10, (uint16_t)(((uint16_t)k << 10) | (get_be16(f + 10) & 0x3FF)));
+		} else if (!g_cfg.no_len) put_be16(f + 16, plen);
+		if (len < g_cfg.min_frame) { memset(f + len, 0, g_cfg.min_frame - len); len = g_cfg.min_frame; }
+		m->data_len = m->pkt_len = len;
+		tap(&s->dump_tx, c->port, "TX", m);
+		tx[n] = m;
+		avail -= k; ntxn += (uint64_t)k; wire += frame_wire(len);
+	}
+	if (n == 0) return 0;
+	L->next_id = next_id;
+	L->idq_tail = tail;
+	if (seq) __atomic_store_n(&L->tx_txn, L->tx_txn + ntxn, __ATOMIC_RELEASE);
+	tx_all(c->port, L->txq, tx, (uint16_t)n);
+	swd_add(s, rte_rdtsc() - now, (uint32_t)n);
+	s->tx_pkts += n;
+	s->tx_wire_bytes += wire;
+	s->busy_cyc += rte_rdtsc() - t_s;
+	return n;
+}
+
 /* 收一批响应并销账。返回收到的包数 */
 static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 {
@@ -156,10 +250,11 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		const uint32_t id = id_resolve(c, (uint32_t)(v & 0xFFFF));
 		if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }
 		hist_add(s, now - c->ts[id]);
+		const uint64_t wb = g_cfg.rand ? (uint64_t)c->nb[id] * BEAT : wdata;   /* 清 outst 前读 */
 		__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
 		if (pool) { const uint8_t o = c->owner[id]; c->lane[o].idq[head[o]++ & (ID_SPACE - 1)] = (uint16_t)id; }
 		done++;
-		s->data_bytes += c->read ? (v >> 16) : wdata;
+		s->data_bytes += c->read ? (v >> 16) : wb;   /* 转交来的读响应不校验数据（帧已在原队列释放） */
 	}
 	rxd_record(s, c->port, rx, nr, now);
 	for (uint16_t i = 0; i < nr && i < RX_PREFETCH; i++) rx_prefetch(rx[i]);
@@ -185,8 +280,11 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 		bool bad;
 		int k = axi_rsp_parse(p, hi.plen, hi.ntxn, vc, ids, data, &bad);
 		if (bad) { s->err++; dump_bad(s, c->port, "bad AXI payload", m); }
+		uint16_t off = 0;                        /* 当前事务在 payload 里的位置（--random 校验读数据用） */
 		for (int j = 0; j < k; j++) {
 			uint32_t id = ids[j];
+			const uint16_t toff = off;
+			off = (uint16_t)(off + (vc == VC_R ? R_HDR + data[j] : B_RSP));
 			const uint16_t own = c->xq ? id_owner(id, vc == VC_R) : c->flow;
 			if (own != c->flow) {                  /* 各流 source id 不同，这样的合并是 E100c 的错误：记错并转交销账 */
 				struct flow_ctx *t = c - c->flow + own;
@@ -195,13 +293,28 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 				if (rte_ring_mp_enqueue(t->xq, (void *)(uintptr_t)(id | ((uint64_t)data[j] << 16))) != 0) s->err++;
 				continue;
 			}
-			id = id_resolve(c, id);
+			id = (g_cfg.rand && vc == VC_R) ? id_resolve_rd(c, id, data[j] / BEAT) : id_resolve(c, id);
 			if (id >= ID_SPACE || !__atomic_load_n(&c->outst[id], __ATOMIC_ACQUIRE)) { s->err++; continue; }   /* 重复 / 超时回收后迟到 */
 			hist_add(s, now - c->ts[id]);        /* 清零前读：清零后 TX 可能立即复用并改写 ts */
+			uint64_t wb = wdata;
+			if (g_cfg.rand) {                    /* --random：拍数按本 ID 发出时记的；读数据逐拍校验 */
+				const uint32_t nb = c->nb[id];
+				wb = (uint64_t)nb * BEAT;
+				const uint32_t got = data[j] / BEAT;
+				if (vc == VC_R && !rand_data_ok(p + toff + R_HDR, got, nb)) {
+					if (rand_data_ok(p + toff + R_HDR, got, got)) {   /* 数据完好、拍数和请求不同：算协议错误 */
+						s->err++;
+						if (s->err <= 3) dump_bad(s, c->port, "read beats != request arlen (data intact)", m);
+					} else {
+						s->derr++;
+						if (s->derr <= 3) dump_bad(s, c->port, "read data corrupt", m);
+					}
+				}
+			}
 			__atomic_store_n(&c->outst[id], 0, __ATOMIC_RELEASE);
 			if (pool) { const uint8_t o = c->owner[id]; c->lane[o].idq[head[o]++ & (ID_SPACE - 1)] = (uint16_t)id; }
 			done++;
-			s->data_bytes += c->read ? data[j] : wdata;
+			s->data_bytes += c->read ? data[j] : wb;
 		}
 	}
 	if (pool)                                    /* 只发布有变化的环，免得无谓地让发送核的 cache line 失效 */
@@ -217,6 +330,11 @@ static inline uint16_t rx_step(struct flow_ctx *c, struct port_stat *s)
 int sender_loop(void *arg)
 {
 	struct flow_ctx *c = arg;
+	if (g_cfg.rand) {
+		c->lane[0].rng = rng_seed(g_cfg.seed, (uint64_t)c->idx * MAX_TXC);
+		while (!g_quit) { tx_step_rand(c, &c->lane[0], &c->st); rx_step(c, &c->st); }
+		return 0;
+	}
 	while (!g_quit) {
 		tx_step(c, &c->lane[0], &c->st);
 		rx_step(c, &c->st);
@@ -229,6 +347,11 @@ int sender_tx_loop(void *arg)
 	const struct tx_arg *a = arg;
 	struct flow_ctx *c = a->c;
 	struct tx_lane *L = &c->lane[a->k];
+	if (g_cfg.rand) {
+		L->rng = rng_seed(g_cfg.seed, (uint64_t)c->idx * MAX_TXC + a->k);
+		while (!g_quit) tx_step_rand(c, L, &L->st);
+		return 0;
+	}
 	while (!g_quit) tx_step(c, L, &L->st);
 	return 0;
 }

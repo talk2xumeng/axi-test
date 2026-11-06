@@ -48,7 +48,7 @@ static void print_brief(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_
 {
 	static int line;
 	static struct port_stat m[3];                /* 合并后的本次增量直方图：0 = 写，1 = 读，2 = 全部 */
-	struct { uint64_t txp, txw, rxp, rxw, txn, data, err, lost, bad, maxns; double busy; } s[3];
+	struct { uint64_t txp, txw, rxp, rxw, txn, data, err, lost, bad, derr, maxns; double busy; } s[3];
 	const bool two = (g_cfg.sender && g_cfg.mix) || g_cfg.rw;
 	memset(s, 0, sizeof(s));
 	for (int g = 0; g < 3; g++) { memset(m[g].hist, 0, sizeof(m[g].hist)); memset(m[g].hist2, 0, sizeof(m[g].hist2)); }
@@ -72,7 +72,7 @@ static void print_brief(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_
 			s[g].txp += txp; s[g].txw += txw;
 			s[g].rxp += st->rx_pkts - o->rx_pkts; s[g].rxw += st->rx_wire_bytes - o->rx_wire_bytes;
 			s[g].txn += st->txn_done - o->txn_done; s[g].data += st->data_bytes - o->data_bytes;
-			s[g].err += st->err; s[g].lost += st->lost + tlost; s[g].bad += st->xmac + st->pcpx;
+			s[g].err += st->err; s[g].lost += st->lost + tlost; s[g].bad += st->xmac + st->pcpx; s[g].derr += st->derr;
 			if (st->rtt_max_ns > s[g].maxns) s[g].maxns = st->rtt_max_ns;
 			if (busy > s[g].busy) s[g].busy = busy;
 			for (int b = 0; b < HIST_N; b++) m[g].hist[b] += st->hist[b] - o->hist[b];
@@ -87,8 +87,8 @@ static void print_brief(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_
 
 	if (final || line++ % 20 == 0) {
 		if (final) printf("---- total/avg ----\n");
-		if (g_cfg.sender) printf("      txL2G   rxL2G   dataG  txnM/s   p50us   p99us  p999us    maxus    err   lost    bad    miss busy%%\n");
-		else              printf("      txL2G   rxL2G    err    bad    miss busy%%\n");
+		if (g_cfg.sender) printf("      txL2G   rxL2G   dataG  txnM/s   p50us   p99us  p999us    maxus    err   lost    bad    miss busy%%%s\n", g_cfg.rand ? "    derr" : "");
+		else              printf("      txL2G   rxL2G    err    bad    miss busy%%%s\n", g_cfg.rand ? "    derr" : "");
 	}
 	static const char *const name[3] = { "w", "r", "all" };
 	for (int g = two ? 0 : 2; g < 3; g++) {
@@ -101,14 +101,16 @@ static void print_brief(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_
 			uint64_t h = 0;
 			for (int b = 0; b < HIST_N; b++) h += m[g].hist[b];
 			for (int b = 0; b < HIST2_N; b++) h += m[g].hist2[b];
-			printf("%-4s %7.1f %7.1f %7.1f %7.2f %7.2f %7.2f %7.1f %8.1f %6lu %6lu %6lu %7s %5.0f\n", name[g], txl2, rxl2,
+			printf("%-4s %7.1f %7.1f %7.1f %7.2f %7.2f %7.2f %7.1f %8.1f %6lu %6lu %6lu %7s %5.0f", name[g], txl2, rxl2,
 			       s[g].data * 8 / dt / 1e9, n / dt / 1e6,
 			       h ? pct(&m[g], h, 0.5) / 1e3 : 0, h ? pct(&m[g], h, 0.99) / 1e3 : 0, h ? pct(&m[g], h, 0.999) / 1e3 : 0,
 			       s[g].maxns / 1e3, (unsigned long)s[g].err, (unsigned long)s[g].lost, (unsigned long)s[g].bad, ms, s[g].busy);
 		} else {
-			printf("%-4s %7.1f %7.1f %6lu %6lu %7s %5.0f\n", name[g], txl2, rxl2,
+			printf("%-4s %7.1f %7.1f %6lu %6lu %7s %5.0f", name[g], txl2, rxl2,
 			       (unsigned long)s[g].err, (unsigned long)s[g].bad, ms, s[g].busy);
 		}
+		if (g_cfg.rand) printf(" %7lu", (unsigned long)s[g].derr);   /* 累计 */
+		printf("\n");
 	}
 	if (!final)
 		for (uint16_t i = 0; i < g_nb_flows; i++) {
@@ -123,8 +125,8 @@ void stats_print(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_TXC], d
 	if (g_cfg.brief) { print_brief(prev, prev_tx, dt, final); return; }
 	static int line;
 	if (final || line++ % 20 == 0)
-		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts       txns   err  lost   ign  xmac  pcpx imissed nombuf%s  swd50us swd99us\n",
-		       final ? "---- total/avg ----\n" : "", g_cfg.hwts ? "  rxd50us rxd99us rxdneg" : "");
+		printf("%sflow txMpps txWireG rxMpps rxWireG txnM/s dataG  meanus  p50us  p99us p999us   maxus     slow busyT%% busyR%% cyc/pk  rxB     txPkts     rxPkts       txns   err  lost   ign  xmac  pcpx imissed nombuf%s  swd50us swd99us%s\n",
+		       final ? "---- total/avg ----\n" : "", g_cfg.hwts ? "  rxd50us rxd99us rxdneg" : "", g_cfg.rand ? "    derr" : "");
 	for (uint16_t i = 0; i < g_nb_flows; i++) {
 		struct flow_ctx *c = &g_flow[i];
 		struct port_stat *st = &c->st, *o = &prev[i];
@@ -167,6 +169,7 @@ void stats_print(struct port_stat *prev, struct port_stat (*prev_tx)[MAX_TXC], d
 		const uint64_t *sh = swn ? swh : st->swd_hist;      /* sender 分核时在各发送核的统计里，合并 */
 		const uint64_t sn = swn ? swn : st->swd_n;
 		printf("  %7.2f %7.2f", sn ? swd_pct(sh, sn, 0.5) : 0, sn ? swd_pct(sh, sn, 0.99) : 0);
+		if (g_cfg.rand) printf(" %7lu", (unsigned long)st->derr);
 		printf("\n");
 		if (!final) { *o = *st; for (uint16_t k = 0; k < c->ntx; k++) prev_tx[i][k] = c->lane[k].st; }
 	}
