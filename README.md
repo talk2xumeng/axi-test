@@ -42,6 +42,20 @@ make
 echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ldconfig
 ```
 
+### 单文件发布构建
+
+```bash
+# 产出 axiperf-static，并检查它确实是不依赖共享库的静态 ELF
+make static
+file axiperf-static
+```
+
+`make static` 使用 `pkg-config --static libdpdk`，因此构建机必须同时安装版本匹配的
+DPDK、rdma-core（`libibverbs` / `libmlx5`）、libnuma 等静态库。运行机器仍需 mlx5
+内核驱动、已绑定的网卡和 hugepages，这些属于内核/硬件运行环境，不能打进 bin。
+若静态 rdma-core 与 DPDK 构建时使用的版本不一致，链接会因缺少 `mlx5dv_*` 或
+`ibv_*` 符号而失败；应统一构建工具链版本，不要用动态库掩盖该问题。
+
 ## 运行：eth 头（单个 400G 口，多条流以 MAC 区分）
 
 ```bash

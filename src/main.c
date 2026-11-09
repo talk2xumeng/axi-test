@@ -370,7 +370,7 @@ int main(int argc, char **argv)
 	if (ret < 0) rte_exit(EXIT_FAILURE, "EAL init failed\n");
 	parse_args(argc - ret, argv + ret);
 	rte_pdump_init();                       /* 允许 dpdk-dumpcap 旁路抓包 */
-	if (g_cfg.pcap_path) pcap_open(g_cfg.pcap_path);
+	if (g_cfg.pcap_path) capture_pcap_open(g_cfg.pcap_path);
 	signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
 	stats_init();
 
@@ -493,7 +493,7 @@ int main(int argc, char **argv)
 		stats_print(zero, zero_tx, (double)(rte_get_timer_cycles() - t0) / hz, true);
 	}
 	port_fini();
-	pcap_close();
+	capture_pcap_close();
 	rte_eal_cleanup();
 	return 0;
 }

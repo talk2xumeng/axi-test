@@ -10,16 +10,16 @@ extern bool g_pcap_on;
 
 void dump_bad(struct port_stat *st, uint16_t port, const char *why, struct rte_mbuf *m);
 void dump_frame(uint64_t *cnt, uint16_t port, const char *dir, struct rte_mbuf *m);
-void pcap_open(const char *path);
-void pcap_write(struct rte_mbuf *m);
-void pcap_close(void);
+void capture_pcap_open(const char *path);
+void capture_pcap_write(struct rte_mbuf *m);
+void capture_pcap_close(void);
 
 /* 收发路径旁路点；两者都关闭时只有一次判断 */
 static inline void tap(uint64_t *cnt, uint16_t port, const char *dir, struct rte_mbuf *m)
 {
 	if (likely(!g_cfg.dump && !g_pcap_on)) return;
 	if (g_cfg.dump) dump_frame(cnt, port, dir, m);
-	if (g_pcap_on) pcap_write(m);
+	if (g_pcap_on) capture_pcap_write(m);
 }
 
 #endif

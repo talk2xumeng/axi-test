@@ -38,7 +38,7 @@ void dump_frame(uint64_t *cnt, uint16_t port, const char *dir, struct rte_mbuf *
 	fflush(stdout);
 }
 
-void pcap_open(const char *path)
+void capture_pcap_open(const char *path)
 {
 	g_pcap = fopen(path, "wb");
 	if (!g_pcap) rte_exit(EXIT_FAILURE, "无法创建 %s\n", path);
@@ -48,7 +48,7 @@ void pcap_open(const char *path)
 	g_pcap_on = true;
 }
 
-void pcap_write(struct rte_mbuf *m)
+void capture_pcap_write(struct rte_mbuf *m)
 {
 	if (!g_pcap || __atomic_load_n(&g_cfg.pcap_left, __ATOMIC_RELAXED) == 0) return;
 	struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
@@ -63,7 +63,7 @@ void pcap_write(struct rte_mbuf *m)
 	rte_spinlock_unlock(&g_pcap_lock);
 }
 
-void pcap_close(void)
+void capture_pcap_close(void)
 {
 	if (!g_pcap) return;
 	g_pcap_on = false;
