@@ -11,8 +11,9 @@
 |---|---|---|---|
 | `eth`（默认） | `DMAC SMAC 0x8100 PCP/DEI/VID Length \| AXI 事务 × k` | 按 Length 截断 | 当前测试格式 |
 | `sue` | `DstGPU(2)+Rsv(4) SrcGPU(2)+Rsv(4) 0x8100 OPCP/OCFI/OVID EtherType RSV/PackNum/Format/PktType \| AXI 事务 × k` | 按 PackNum 解析 | 试验性，字段取值待与 IP 侧确认 |
+| OISA（`--hdr eth --ethertype 0x88ee`） | `OISA 头(12) 0x88EE 2B \| AXI 事务 × k`，无 802.1Q、无 Length | 按帧长解析 | 经 E100c 测试用的格式，字段见 [docs/E100c_OISA包头定义.md](docs/E100c_OISA包头定义.md) |
 
-两种格式 PCP = VC，头部字段 32 bit 大端，接收端按 frame_type 分发、PCP 只做核对。
+eth / sue 两种格式 PCP = VC，头部字段 32 bit 大端，接收端按 frame_type 分发、PCP 只做核对。OISA 格式不核对 PCP，用法见下文“运行：经 E100c（OISA 头）”。
 
 ## 代码结构
 
@@ -20,7 +21,7 @@
 src/
   common.h       常量、运行配置、每流上下文、统计结构
   hdr.h / hdr.c  以太头抽象层：build / parse / reply 按 --hdr 分发（inline，无函数指针开销）
-  hdr_eth.h      eth 头：802.1Q + 802.3 Length
+  hdr_eth.h      eth 头：802.1Q + 802.3 Length；--no-len、--ethertype（OISA）变体也在这里
   hdr_sue.h      sue 头：SUEv1-标准ETH（试验性）
   axi.h          AXI 事务编码与解析（与头格式无关）
   sender.c       发请求、收响应、窗口、RTT
@@ -28,7 +29,11 @@ src/
   port.c         端口、队列、mempool、预填模板、导流
   stats.c        每秒统计输出
   capture.c      异常帧打印、--dump、--pcap
+  hwts.c         --hwts 网卡时间戳与 TSC 对时
   main.c         参数、核分配、主循环
+tools/           rndq（RANDOM 分队列探针）、pingpong（最小时延探针）
+scripts/         e100c.sh（经 E100c 测试的封装脚本）、e100c_matrix.sh、axienv.sh
+wireshark/       axi_over_eth.lua（eth / sue 头）、oisa_axi.lua（OISA 头）
 ```
 
 新增一种头格式：新建 `src/hdr_xxx.h` 实现 `xxx_build / xxx_parse / xxx_update`，在 `enum hdr_kind` 加一项，在 `hdr.h` 的各 switch 与 `hdr.c`（名称、参数校验、流地址推导）中各加一个 case，其余文件不用改。
@@ -108,6 +113,32 @@ DPDK、rdma-core（`libibverbs` / `libmlx5`）、libnuma 等静态库。运行�
 
 测试拓扑、用例与阶段性结果见 `docs/AXI环回测试_拓扑与用例_v0.8.md`。
 
+## 运行：经 E100c（OISA 头）
+
+经 E100c 时帧头为 OISA 格式（`--ethertype 0x88ee`）。日常测试用 `scripts/e100c.sh`，它会填好下面这些固定参数（`--dry-run` 可打印实际命令）；完整说明、对口表和各场景命令见 [docs/E100c_测试手册.md](docs/E100c_测试手册.md)。
+
+```bash
+# 反射端：4 核，网卡按随机值把同一对 MAC 的请求均分到 4 个队列（devargs 须加 dv_flow_en=2）
+sudo ./axiperf --huge-unlink -l 44,45-48 \
+  -a 0000:71:00.0,dv_flow_en=2,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0 -- \
+  --mode reflector --ethertype 0x88ee --min-frame 0 --vid 0 \
+  --rx-split 4 --rxd 4096 --burst 16 --b-pack 1 --b-port 0 --b-tag 0 --r-user 0 --brief
+
+# 发送端：写，每帧 2 个事务、每事务 4 拍，经 E100c ETH 口 1
+sudo ./axiperf --huge-unlink -l 65,66-67 \
+  -a 0000:dd:00.0,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0 -- \
+  --mode sender --ethertype 0x88ee --min-frame 0 --timeout-us 0 --vid 0 \
+  --dmac 0,c0:c0:00:a0:00:00 --smac 00:00:00:00:04:01 --e100c-port 0,1 \
+  --op write --window 200 --pack 2 --beats 4 --burst 16 --time 30 --brief
+```
+
+- OISA 头第 0~5 字节由 `--dmac` 给初值（写请求 `c0 c0`），第 6~11 字节（tag_id、dest_id、source_id）由 `--smac` 给初值；写响应每帧只能放 1 个 B（`--b-pack 1`）。
+- 读请求 aruser 的 `sect_mask` 按拍数自动填写，填 0 会让 E100c 读卡死（见包头文档）。
+- 读写并发：`--op mix`，读、写走不同 E100c 出口时用 `--e100c-rport` 单独指定读请求的 user.port。
+- 多流：`--flows N` 时 `--one-dmac` 让各流都发往同一个 `--dmac`（`e100c.sh` 默认就加）；两个口进、一个口出时，两个发送端共用一个反射端（手册 5.7）。
+- 同一网口双向打流：两端都加 `--isolate`，按 OISA 第 0 字节 bit 3 区分请求和响应，反射端多核用 `--flows N`，不能和 `--rx-split` 同用。
+- 随机测试：两端都加 `--random`，见参数表。
+
 ## 参数
 
 | 参数 | 默认 | 说明 |
@@ -128,7 +159,7 @@ DPDK、rdma-core（`libibverbs` / `libmlx5`）、libnuma 等静态库。运行�
 | `--hwts` | 关 | 开接收硬件时间戳，统计每个包从网卡收到到 CPU 拿到的时延（rxd50us / rxd99us 列，两端都可用）。网卡时钟每秒与 TSC 对齐一次，偏差约 ±0.5 µs；rxdneg 为换算为负的样本数，持续增长说明对时不准 |
 | `--b-port` | 0 | reflector：写响应 B 的 port id（W0[7:5]），0~7 |
 | `--b-tag` | 0 | reflector：`--ethertype` 时写响应 EtherType 后的 16 位 |
-| `--min-frame` | 0 | 请求、响应都补 0 到 N 字节，不含 FCS（线上 N+4）；0 = 不补。E100c 要求至少 512 字节（含 FCS），即 508 |
+| `--min-frame` | 0 | 请求、响应都补 0 到 N 字节，不含 FCS（线上 N+4）；0 = 不补（短帧由网卡补到以太网最小帧）。当前经 E100c 测试用 0 |
 | `--count` | 0 | sender：每个发送上下文发满 N 个请求包后不再发，进程仍运行到 `--time` 结束；0 = 不限。窗口小于 N 时，收不到响应就发不满 |
 | `--random` | 关 | 随机测试，两端都要设。sender 每帧事务数在 1~`--pack`（读为 `--rpack`）、每事务拍数在 1~`--beats` 间随机（写帧总拍数 ≤ 8），逐帧现场构造；每个 64B 数据拍为自校验图样（首字低 8 位 = 拍序号 × 16 + 本事务拍数，其余 15 个字由首字按 xorshift32 推出）。reflector 校验写数据、读响应填随机图样；sender 校验读数据并核对拍数。数据不对的事务数在输出最后一列 `derr`；读拍数和请求不同但数据完好时计入 `err`。只用于 eth 头，不能与 `--tx-cores` > 1、`--r-split` 同用；sender CPU 跑满，吞吐低于普通模式 |
 | `--seed` | TSC | `--random` 的随机种子，启动时打印，sender 用同一个值可复现同样的随机序列 |
@@ -143,7 +174,7 @@ DPDK、rdma-core（`libibverbs` / `libmlx5`）、libnuma 等静态库。运行�
 | `--promisc` | — | 强制混杂模式（默认 eth 头只收本端各流 MAC） |
 | `--dmac` | — | eth：`PORT,xx:xx:xx:xx:xx:xx`，对端网卡真实 MAC，可重复 |
 | `--no-len` | 关 | eth 头不带 Length，事务头紧跟 802.1Q 标签，从第 16 字节开始（E100c 格式）；接收端按帧长解析，遇到全 0 的 W0 视为补齐。两端都要设 |
-| `--ethertype` | 关 | 不带 802.1Q，帧头为 EtherType + 0000、无 Length（E100c 用 `0x88ee`）。不核对 PCP；两端都开混杂、不核对 DMAC，只支持 `--flows 1` 的单写 / 单读 |
+| `--ethertype` | 关 | 不带 802.1Q，帧头为 EtherType + 0000、无 Length（E100c 用 `0x88ee`）。不核对 PCP；两端都开混杂、不核对 DMAC。sender 不支持 `--op rw`（读写并发用 mix），`--flows` 须为 2 的幂（mix 至少 2），且 flows × window ≤ ID 空间（mix 为 flows/2 × window）。帧格式见 [docs/E100c_OISA包头定义.md](docs/E100c_OISA包头定义.md) |
 | `--smac` | 网卡真实 MAC | sender：流 0 的 SMAC，其余流按规则派生。响应的 DMAC 也要是这个地址 |
 | `--e100c-port` | 0 | sender：`PORT,N`，DPDK 端口 PORT 所接 E100c 的 ETH 口号 N（1~4），写入每个请求的 user.port（awuser[51:49] / aruser[48:46]），可为各端口重复设置；未设填 0。实际连线须与口号一致 |
 | `--gpu-id` | — | sue：本端 GPU ID 基址（必填） |
@@ -151,6 +182,15 @@ DPDK、rdma-core（`libibverbs` / `libmlx5`）、libnuma 等静态库。运行�
 | `--sue-ethertype` | 0x88B5 | sue：EtherType（须 > 1500） |
 | `--sue-format` | 0 | sue：Format[2:0] |
 | `--sue-pkttype` | 0 | sue：PktType[4:0] |
+| `--one-dmac` | 关 | sender：各流请求都发往 `--dmac` 给出的同一个 MAC，不按流派生（多源 MAC → 单一目的 MAC；反射端用 `--flows 1` 或 `--rx-split`） |
+| `--e100c-rport` | 同 `--e100c-port` | sender：读请求的 user.port 改填 N（0~7），写请求仍用 `--e100c-port`；`--op mix` 时读、写从同一网口发出、经 E100c 走不同出口 |
+| `--rx-split` | 关 | reflector：同一对 MAC 的请求由网卡按随机值（`RTE_FLOW_ITEM_TYPE_RANDOM`）均分到 N 个接收队列，各一个核（N = 2/4/8/16）。经 E100c 后只有一对 MAC 时用；不能与 `--flows` 同用；devargs 须加 `dv_flow_en=2` 并用多流 devargs。需要 DPDK 带 RANDOM（DOCA 22.11 或上游 24.03 起），编译时自动检测 |
+| `--rxd` | 1024 | 每个接收队列的描述符数，2 的幂、64~32768；`--rx-split` 高包率时建议 4096 |
+| `--isolate` | 关 | `--ethertype` 时用 rte_flow 隔离模式：sender 只收响应、reflector 只收请求，同一网口可同时跑两个进程（双向打流）。reflector 多核用 `--flows N`（2 的幂，按请求 tag 低位分队列），不能与 `--rx-split` 同用 |
+| `--gap-us` | 0 | sender 调试：每隔 N 微秒最多发 1 个请求包；0 = 不限速 |
+| `--r-user` | 0 | reflector：`--ethertype` 时读响应 W0 低位（ruser）原样填这个值 |
+
+E100c 调试参数（`--ar-user-low`、`--req-b1`、`--req-tag`、`--r-beats`、`--r-echo-aruser`、`--r-len-data`、`--r-pack-beats`、`--r-split`）只用于排查读写响应格式，说明见 [docs/E100c_测试手册.md](docs/E100c_测试手册.md) 6.3 节或 `./axiperf -- --help`。
 
 ## user 域（E100c）
 
@@ -184,6 +224,9 @@ sender 在每个请求事务的 awuser / aruser 里填 user.tsn 与 user.port，
 | ign / xmac / pcpx | 非 AXI 背景帧数 / DMAC 不是本流的 AXI 帧数（交换机泛洪副本等，已丢弃）/ PCP 与 VC 不一致的帧数 |
 | swd50us / swd99us | 软件时延（累计，20 ns 一档，按包计）。sender：打 RTT 起点时间戳 → tx_burst 返回（组包、写 ID、下发描述符；多个发送核时合并统计）；reflector：rx_burst 返回 → 该响应的 tx_burst 返回（停留时间）。RTT 减去两端 swd、两端 rxd（--hwts）后，剩下网卡收发、PCIe、线路与交换机 |
 | imissed / nombuf | 网卡侧丢包（描述符 / mbuf 不足） |
+| derr | 只在 `--random` 时有：数据校验不对的事务数（累计）；sender 查读数据，reflector 查写数据 |
+
+`--brief` 时列不同，见参数表 `--brief` 一行。
 
 理论值（每 100G）：写请求 21.3 Mpps / 数据 87.4G；读响应 22.2 Mpps / 数据 91.1G（eth 头；sue 头每帧多 2B，略低）。
 
@@ -211,7 +254,8 @@ cur=$(setpci -s <BDF> CAP_EXP+8.w); setpci -s <BDF> CAP_EXP+8.w=$(printf %04x $(
 
 - 不做 PFC、不重传；超时事务只回收 ID 并计入 lost。9 bit ID 无法区分迟到响应与复用后的新响应，迟到响应计入 err。
 - 启动时每条流发 4 个广播帧（EtherType 0x9000）让交换机学习地址，对端计入 ign。
-- 读响应 rdata 为模板固定内容。
+- 读响应 rdata 默认为模板固定内容（`--random` 时为自校验随机图样）。
 - RTT 为累计直方图，不按秒清零。
 - eth 头默认非混杂；`--promisc` 可强制打开。sue 头仍用混杂 + allmulticast，靠软件核对 DMAC。
 - eth 头已在 DOCA DPDK 22.11.2410 + CX7 实机验证（两网卡 16 条流：写 737G / 读 687G 线上速率，err = 0；CQE 压缩开）；sue 头仅在 memif 上做过功能验证。
+- OISA 格式（`--ethertype 0x88ee`）在 DPDK 24.11 + E100c 实机验证，包括 `--random`，结果见 `docs/E100c_写性能与读卡死测试报告.md` 和测试手册。
