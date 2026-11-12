@@ -120,7 +120,8 @@ static inline int tx_step(struct flow_ctx *c, struct tx_lane *L, struct port_sta
 			if (seq) { id = next_id; next_id = (id + step) & (ID_SPACE - 1); }
 			else id = L->idq[tail++ & (ID_SPACE - 1)];
 			axi_req_set(p, rd, id & (WIRE_IDS - 1), beats, uport, tsn++);
-			if (k == 0 && g_cfg.req_tag) put_be16(rte_pktmbuf_mtod(tx[i], uint8_t *) + 6, (uint16_t)(id & (WIRE_IDS - 1)));   /* --req-tag：OISA tag_id = AXI ID */			c->ts[id] = now;
+			if (k == 0 && g_cfg.req_tag) put_be16(rte_pktmbuf_mtod(tx[i], uint8_t *) + 6, (uint16_t)(id & (WIRE_IDS - 1)));   /* --req-tag：OISA tag_id = AXI ID */
+			c->ts[id] = now;
 			__atomic_store_n(&c->outst[id], 1, __ATOMIC_RELEASE);
 		}
 		tx[i]->data_len = tx[i]->pkt_len = len;
