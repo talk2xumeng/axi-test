@@ -60,11 +60,15 @@ sed -i 's/^Libs.private:.*/Libs.private: -lmlx5 -libverbs -lpthread/' \
 	"$RDMA_PREFIX/lib/pkgconfig/libibverbs.pc"
 
 checkout https://github.com/DPDK/dpdk.git "$DPDK_COMMIT" "$WORK/dpdk"
+# cpu_instruction_set=generic：默认 auto 会把 -march=native 写进 libdpdk.pc，
+# axiperf 也跟着按构建机 CPU 编译，拷到老一些的服务器上会因非法指令崩溃。
+# generic 为 -march=corei7（SSE4.2），mlx5 收发仍走 SSE 向量路径。
 export PKG_CONFIG_PATH="$RDMA_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 "${MESON[@]}" setup "$WORK/dpdk-build" "$WORK/dpdk" --wipe \
 	--prefix "$DPDK_PREFIX" \
 	--libdir lib/x86_64-linux-gnu \
 	-Dbuildtype=release \
+	-Dcpu_instruction_set=generic \
 	-Ddefault_library=static \
 	-Dibverbs_link=static \
 	-Denable_drivers=bus/auxiliary,common/mlx5,net/mlx5

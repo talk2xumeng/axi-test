@@ -62,6 +62,13 @@ file axiperf-static
 `make static` 会拒绝其它 DPDK / rdma-core 版本（普通 `make` 不检查）。运行机器仍需 mlx5
 内核驱动、已绑定的网卡和 hugepages，这些属于内核/硬件运行环境，不能打进 bin。
 
+- DPDK 按 `cpu_instruction_set=generic`（`-march=corei7`）构建，产物不依赖构建机的 CPU 型号。
+- 全静态时 glibc 的 `dlopen` 不可用，链接时用 `-Wl,--wrap=dlopen` 换成空实现
+  （[static/nodlopen.c](static/nodlopen.c)），驱动都已链进程序，不加载任何 .so。
+- 链接时 glibc 关于 `dlopen`、`getaddrinfo` 等的 warning 来自 DPDK 里 axiperf 不用的代码，可忽略。
+- 11-12 在 Ubuntu 20.04（gcc 9.4）上验证：`make static` 产出约 10MB 全静态 ELF，
+  在 CX7 上能正常加载 mlx5、下发 rte_flow，`--rx-split`（HW steering + RANDOM）正常；还没跑过流量。
+
 ## 运行：eth 头（单个 400G 口，多条流以 MAC 区分）
 
 ```bash

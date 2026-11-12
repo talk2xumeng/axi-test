@@ -23,8 +23,10 @@ $(APP): $(OBJS)
 # 单文件发布构建。要求 libdpdk.pc 引用的 DPDK、rdma-core、libnuma 等依赖
 # 均提供版本匹配的静态库；链接器缺少任何静态依赖时会直接失败，避免产出
 # 表面叫 static、运行时仍依赖 DPDK .so 的文件。
-$(STATIC_APP): $(OBJS) | check-static-deps
-	$(CC) $(CFLAGS) -static $^ -o $@ $(shell $(PKGCONF) --static --libs libdpdk)
+# 全静态时 glibc 的 dlopen 会段错误（EAL 启动时探测插件就会调用），用 --wrap 换成
+# 总是返回“找不到”的空实现：驱动都已静态链接，不需要加载任何 .so。
+$(STATIC_APP): $(OBJS) static/nodlopen.c | check-static-deps
+	$(CC) $(CFLAGS) -static -Wl,--wrap=dlopen $^ -o $@ $(shell $(PKGCONF) --static --libs libdpdk)
 	@file $@ | grep -q 'statically linked' || { echo "$@ 不是全静态 ELF" >&2; rm -f $@; exit 1; }
 	@! ldd $@ >/dev/null 2>&1 || { echo "$@ 仍存在动态依赖" >&2; rm -f $@; exit 1; }
 	$(STRIP) --strip-unneeded $@
