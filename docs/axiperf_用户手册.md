@@ -247,7 +247,7 @@ axiperf 要访问大页和网卡，用 `sudo` 运行。同一台机器同时跑�
 |---|---|---|---|
 | eth（默认） | `--hdr eth` | `DMAC SMAC 0x8100 PCP/VID Length` | 802.1Q + 802.3 Length，PCP 表示 AXI 通道（VC） |
 | eth 无 Length | `--hdr eth --no-len` | `DMAC SMAC 0x8100 PCP/VID` | 事务头紧跟 VLAN 标签，按帧长解析，全 0 的事务头视为补齐 |
-| OISA | `--hdr eth --ethertype X` | `OISA 头 12 字节, EtherType, 2 字节` | 无 VLAN、无 Length，字段见 [OISA 包头定义](E100c_OISA包头定义.md) |
+| OISA | `--ethertype 0x88ee` | `OISA 头 12 字节, EtherType 0x88EE, 2 字节` | 无 VLAN、无 Length，字段见 [OISA 包头定义](E100c_OISA包头定义.md) |
 | sue（试验性） | `--hdr sue` | SUEv1-标准 ETH | GPU ID 写在 MAC 字段，字段取值未最终确认 |
 
 两端的帧头参数必须一致。`--min-frame N` 把短帧补 0 到 N 字节（被测设备有最小帧长要求时用）。
@@ -494,7 +494,7 @@ sudo dpdk-dumpcap --file-prefix snd -i 0 -w ~/x.pcapng -c 1000
 | `--smac MAC` | 网卡真实 MAC | 发送端：流 0 的源 MAC，其余流由它派生 |
 | `--one-dmac` | 关 | 发送端各流都发往 `--dmac` 给的同一个 MAC；反射端用 `--flows 1` 或 `--rx-split` |
 | `--no-len` | 关 | eth 头不带 Length；两端都要设 |
-| `--ethertype X` | 关 | OISA 格式：无 VLAN、无 Length；不核对 PCP 和 DMAC，两端都开混杂；发送端不支持 rw，`--flows` 须为 2 的幂 |
+| `--ethertype X` | 关 | OISA 格式，X 是写在帧头第 12~13 字节的 EtherType，OISA 填 `0x88ee`（程序不限定取值，0 表示不用这种格式）。无 VLAN、无 Length；不核对 PCP 和 DMAC，两端都开混杂；发送端不支持 rw，`--flows` 须为 2 的幂 |
 | `--min-frame N` | 0 | 请求、响应都补 0 到 N 字节（不含 FCS）；0 = 不补 |
 | `--promisc` | 关 | 强制混杂模式；默认 eth 头只收本端各流的 MAC |
 
