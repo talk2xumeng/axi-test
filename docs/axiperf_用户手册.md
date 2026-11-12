@@ -1,6 +1,6 @@
 # axiperf 用户手册
 
-本文说明怎样在一台新服务器上编译、准备和运行 `axiperf`，以及测试拓扑、程序原理和全部参数。不针对某一台被测设备；对接具体设备时的固定参数和脚本另见该设备的测试手册（如 [E100c_测试手册.md](E100c_测试手册.md)）。
+本文说明怎样在一台新服务器上编译、准备和运行 `axiperf`，以及测试拓扑、程序原理和全部参数。不针对某一台被测设备；对接具体设备时的固定参数和脚本，见该设备自己的测试文档。
 
 ## 目录
 
@@ -42,7 +42,7 @@
 
 | 项 | 要求 |
 |---|---|
-| 网卡 | NVIDIA / Mellanox ConnectX（mlx5 驱动），已在 CX7 400G 上验证。程序用了 mlx5 的 rte_flow（按 MAC 导流、`--rx-split` 的随机值匹配、`--isolate`），其它网卡未测 |
+| 网卡 | NVIDIA / Mellanox ConnectX（mlx5 驱动）。程序用了 mlx5 的 rte_flow（按 MAC 导流、`--rx-split` 的随机值匹配、`--isolate`），其它网卡未测 |
 | PCIe | 网卡插在 x16 槽，链路协商为 x16（宽度不够时带宽被限制） |
 | CPU | 每条流 1~2 个专用核，另加 1 个统计核；核要和网卡在同一 NUMA 节点，最好是隔离核 |
 | 内存 | 每个用到的 NUMA 节点配大页，参考 4096 个 2MB 页（8GB） |
@@ -51,9 +51,9 @@
 
 | 项 | 要求 |
 |---|---|
-| 操作系统 | Linux x86_64，已在 Ubuntu 20.04（gcc 9.4）上验证 |
+| 操作系统 | Linux x86_64 |
 | 网卡驱动 | 内核 `mlx5_core` + rdma-core（`libibverbs`、`libmlx5`）。mlx5 是分叉驱动，**网卡保持绑定 mlx5_core，不要绑 vfio-pci** |
-| DPDK | 24.11（当前测试机为 24.11.4，装在 `/opt/dpdk-24.11`），或 DOCA 自带的 22.11。需带 mlx5 PMD 和 pdump 库 |
+| DPDK | 24.11，或 DOCA 自带的 22.11。需带 mlx5 PMD 和 pdump 库 |
 | 编译工具 | gcc、make、pkg-config；`libbsd`、`libnl-3`、`libnl-route-3`（DPDK pkg-config 会带上） |
 | 抓包解析（可选） | Wireshark，插件在 `wireshark/` |
 
@@ -74,14 +74,14 @@ make -j$(nproc)
 Makefile 用 `pkg-config libdpdk` 找 DPDK。DPDK 不在系统默认路径时，指定它的 pkgconfig 目录：
 
 ```bash
-export PKG_CONFIG_PATH=/opt/dpdk-24.11/lib/x86_64-linux-gnu/pkgconfig
+export PKG_CONFIG_PATH=<DPDK 安装目录>/lib/x86_64-linux-gnu/pkgconfig
 make -j$(nproc)
 ```
 
 运行时报找不到 `librte_*.so` 时，把库目录加进动态库搜索路径：
 
 ```bash
-echo /opt/dpdk-24.11/lib/x86_64-linux-gnu | sudo tee /etc/ld.so.conf.d/dpdk.conf
+echo <DPDK 安装目录>/lib/x86_64-linux-gnu | sudo tee /etc/ld.so.conf.d/dpdk.conf
 sudo ldconfig
 ```
 
@@ -101,7 +101,7 @@ make pingpong   # 最小 DPDK 乒乓时延探针：单队列、无 rte_flow，�
 
 目标是编出一个不依赖 DPDK / rdma-core `.so` 的 `axiperf-static`，拷到新服务器上直接运行，不用在每台机器上装 DPDK。做法是用脚本从源码构建固定版本（DPDK 24.11.4、rdma-core 50.0）的静态工具链，再 `make static`。
 
-当前状态：在 `single-bin-refactor` 分支上，已能在测试机上编出全静态程序，加载 mlx5、下发 rte_flow 和 `--rx-split` 都正常，还没跑过流量、没在别的服务器上运行过。**合入 main 之前请用 3.1 节的普通编译。**
+这个功能还在验证，正式发布前请用 3.1 节的普通编译。
 
 静态版本仍需要运行机器有 mlx5 内核驱动、大页和网卡，这些不能打进二进制。
 
@@ -247,7 +247,7 @@ axiperf 要访问大页和网卡，用 `sudo` 运行。同一台机器同时跑�
 |---|---|---|---|
 | eth（默认） | `--hdr eth` | `DMAC SMAC 0x8100 PCP/VID Length` | 802.1Q + 802.3 Length，PCP 表示 AXI 通道（VC） |
 | eth 无 Length | `--hdr eth --no-len` | `DMAC SMAC 0x8100 PCP/VID` | 事务头紧跟 VLAN 标签，按帧长解析，全 0 的事务头视为补齐 |
-| OISA | `--hdr eth --ethertype X` | `OISA 头 12 字节, EtherType, 2 字节` | 无 VLAN、无 Length，字段见 [E100c_OISA包头定义.md](E100c_OISA包头定义.md) |
+| OISA | `--hdr eth --ethertype X` | `OISA 头 12 字节, EtherType, 2 字节` | 无 VLAN、无 Length，字段见 [OISA 包头定义](E100c_OISA包头定义.md) |
 | sue（试验性） | `--hdr sue` | SUEv1-标准 ETH | GPU ID 写在 MAC 字段，字段取值未最终确认 |
 
 两端的帧头参数必须一致。`--min-frame N` 把短帧补 0 到 N 字节（被测设备有最小帧长要求时用）。
@@ -304,7 +304,7 @@ axiperf 要访问大页和网卡，用 `sudo` 运行。同一台机器同时跑�
 
 - **tsn**：每个 DPDK 端口写、读各一个计数，每个请求事务加 1，16 位循环。单流单发送核时线上严格连续；多流或多发送核时各队列交错，线上不保证单调。
 - **port**：告诉被测设备这个事务要从它的哪个口出去。`--e100c-port PORT,N` 里 PORT 是本机 DPDK 端口号，N 是这个端口经被测设备后要去的口号；多个网卡可以各写一次。`--e100c-rport N` 只改读请求的 port，用于读、写从同一网口发出、走不同出口的场景。
-- 参数名里的 `e100c` 是历史原因（最早为 E100c 加的），任何按 user.port 转发的设备都用它。
+- 参数名里的 `e100c` 是历史命名，任何按 user.port 转发的设备都用它。
 - **被测设备按 user.port 转发时，port 必须和实际接线一致**，填错了请求会被送到别的口，表现为收不到响应。直连或经普通交换机时没人看这个字段，不用设。
 - 其余 user 位、地址字段填 0（OISA 格式下读请求的 `sect_mask` 按拍数自动填，见包头文档）。Wireshark 插件显示为 `axiperf.user_tsn` / `axiperf.user_port`。
 
@@ -358,20 +358,26 @@ axiperf 要访问大页和网卡，用 `sudo` 运行。同一台机器同时跑�
 sudo ./axiperf <DPDK EAL 参数> -- <axiperf 参数>
 ```
 
-以下示例为直连、标准 eth 头。替换其中的核、PCI 地址和 MAC。**先起反射端，再起发送端；停的时候先停发送端。**
+以下示例为直连、标准 eth 头，反射端和发送端在两台主机上。先在两台主机上设好变量：
+
+```bash
+BDF=<本机测试网卡的 PCI 地址>        # lspci -D | grep -i mellanox
+SINGLE=txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0
+MULTI=mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1
+```
+
+`SINGLE` 用于单流，`MULTI` 用于多流，见 [11.1 节](#111-网卡驱动参数devargs)。示例里的核号只是示意，换成本机和网卡同一 NUMA 的隔离核，个数按 [6.5 节](#65-核的分配) 算。
+
+**先起反射端，再起发送端；停的时候先停发送端。**
 
 ### 8.1 单流写、读
 
 ```bash
-# 反射端：核 35 统计，36 收发
-sudo ./axiperf --file-prefix refl --huge-unlink -l 35,36 \
-  -a 0000:12:00.0,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0 -- \
-  --mode reflector --vid 1
+# 反射端：1 个统计核 + 1 个收发核
+sudo ./axiperf --file-prefix refl --huge-unlink -l 1,2 -a $BDF,$SINGLE --   --mode reflector --vid 1
 
-# 发送端：核 35 统计，36 发、37 收；写 10 秒
-sudo ./axiperf --file-prefix snd --huge-unlink -l 35-37 \
-  -a 0000:12:00.0,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0 -- \
-  --mode sender --op write --vid 1 --dmac 0,<反射端网卡 MAC> --time 10
+# 发送端：1 个统计核 + 发、收各 1 个核；写 10 秒
+sudo ./axiperf --file-prefix snd --huge-unlink -l 1-3 -a $BDF,$SINGLE --   --mode sender --op write --vid 1 --dmac 0,<反射端网卡 MAC> --time 10
 
 # 读：发送端改 --op read
 ```
@@ -379,39 +385,30 @@ sudo ./axiperf --file-prefix snd --huge-unlink -l 35-37 \
 ### 8.2 多流
 
 ```bash
-# 反射端 8 流：1 统计 + 8 核
-sudo ./axiperf --file-prefix refl --huge-unlink -l 23,24-31 -a 0000:12:00.0,$MULTI -- \
-  --mode reflector --vid 1 --flows 8 --burst 16
+# 反射端 8 流：1 + 8 核
+sudo ./axiperf --file-prefix refl --huge-unlink -l 1,2-9 -a $BDF,$MULTI --   --mode reflector --vid 1 --flows 8 --burst 16
 
-# 发送端 8 流、读写混跑：1 统计 + 8 × 2 核
-sudo ./axiperf --file-prefix snd --huge-unlink -l 23,24-39 -a 0000:12:00.0,$MULTI -- \
-  --mode sender --op mix --vid 1 --flows 8 --burst 16 --time 30 --brief \
-  --dmac 0,<反射端网卡 MAC>
+# 发送端 8 流、读写混跑：1 + 8 × 2 核
+sudo ./axiperf --file-prefix snd --huge-unlink -l 1,2-17 -a $BDF,$MULTI --   --mode sender --op mix --vid 1 --flows 8 --burst 16 --time 30 --brief   --dmac 0,<反射端网卡 MAC>
 ```
-
-其中 `MULTI=mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1`，见 [11.1 节](#111-网卡驱动参数devargs)。
 
 ### 8.3 多网卡
 
 ```bash
-# 两口各 8 流，发送端每条流单核收发：1 统计 + 16 核
-sudo ./axiperf --file-prefix snd --huge-unlink -l 23,24-39 \
-  -a 0000:12:00.0,$MULTI -a 0000:33:00.0,$MULTI -- \
-  --mode sender --op write --vid 1 --flows 8 --nosplit --burst 16 --time 10 \
-  --dmac 0,<对端口 0 的 MAC> --dmac 1,<对端口 1 的 MAC>
+# 两口各 8 流，发送端每条流单核收发：1 + 16 核
+sudo ./axiperf --file-prefix snd --huge-unlink -l 1,2-17   -a <网卡 0 的 PCI 地址>,$MULTI -a <网卡 1 的 PCI 地址>,$MULTI --   --mode sender --op write --vid 1 --flows 8 --nosplit --burst 16 --time 10   --dmac 0,<对端口 0 的 MAC> --dmac 1,<对端口 1 的 MAC>
 ```
+
+两块网卡在不同 NUMA 节点时，`-l` 里两个节点的核都要给够，程序会按网卡所在节点选核。
 
 ### 8.4 多个流汇到反射端的一对 MAC（`--rx-split`）
 
 ```bash
-# 反射端：网卡按随机值分到 4 个队列；devargs 须加 dv_flow_en=2
-sudo ./axiperf --file-prefix refl --huge-unlink -l 44,45-48 \
-  -a 0000:71:00.0,dv_flow_en=2,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=0 -- \
-  --mode reflector --vid 1 --rx-split 4 --rxd 4096 --burst 16
+# 反射端：网卡按随机值分到 4 个队列，1 + 4 核；devargs 须加 dv_flow_en=2
+sudo ./axiperf --file-prefix refl --huge-unlink -l 1,2-5 -a $BDF,dv_flow_en=2,$SINGLE --   --mode reflector --vid 1 --rx-split 4 --rxd 4096 --burst 16
 
-# 发送端：4 流都发往同一个目的 MAC
-sudo ./axiperf --file-prefix snd --huge-unlink -l 65,66-73 -a 0000:dd:00.0,$MULTI -- \
-  --mode sender --op write --vid 1 --flows 4 --one-dmac --dmac 0,<反射端网卡 MAC> --time 30 --brief
+# 发送端：4 流都发往同一个目的 MAC，1 + 4 × 2 核
+sudo ./axiperf --file-prefix snd --huge-unlink -l 1,2-9 -a $BDF,$MULTI --   --mode sender --op write --vid 1 --flows 4 --one-dmac --dmac 0,<反射端网卡 MAC> --time 30 --brief
 ```
 
 ### 8.5 随机测试
@@ -428,10 +425,10 @@ sudo ./axiperf --file-prefix snd --huge-unlink -l 65,66-73 -a 0000:dd:00.0,$MULT
 
 ```bash
 # 程序自己写 pcap：小窗口、只抓前 50 帧（有锁和文件写入，性能会下降）
-... --window 4 --pcap /home/<用户>/x.pcap --pcap-count 50
+... --window 4 --pcap ~/x.pcap --pcap-count 50
 
 # 不停流旁路抓包（程序启动时已初始化 pdump）
-sudo dpdk-dumpcap --file-prefix snd -i 0 -w /home/<用户>/x.pcapng -c 1000
+sudo dpdk-dumpcap --file-prefix snd -i 0 -w ~/x.pcapng -c 1000
 ```
 
 用 Wireshark 打开时把 `wireshark/axi_over_eth.lua`（eth / sue 头）或 `wireshark/oisa_axi.lua`（OISA 头）放进 Wireshark 的插件目录。抓包文件不要放 `/tmp`，重启会清空。
@@ -446,7 +443,7 @@ sudo dpdk-dumpcap --file-prefix snd -i 0 -w /home/<用户>/x.pcapng -c 1000
 
 | 参数 | 含义 |
 |---|---|
-| `-l <核列表>` | 用的核，第一个是统计核。如 `-l 35,36-39` |
+| `-l <核列表>` | 用的核，第一个是统计核。如 `-l 1,2-5` |
 | `--lcores <映射>` | lcore 到物理核的映射，物理核编号 ≥ 128 时用。如 `--lcores 0@130,1@131` |
 | `-a <BDF>[,devargs]` | 用的网卡及驱动参数，可写多个；devargs 见 [11.1 节](#111-网卡驱动参数devargs) |
 | `--file-prefix <名字>` | 大页文件前缀；同时跑多个进程时必须不同，也是 `dpdk-dumpcap` 找进程用的名字 |
@@ -609,14 +606,14 @@ RTT 直方图 0~200 µs 为 50 ns 一档，200 µs~100 ms 为 100 µs 一档。
 | 多流 | `mprq_en=1,rxqs_min_mprq=1,mprq_log_stride_num=9,txqs_min_inline=1,txq_inline_mpw=128,rxq_pkt_pad_en=1,rxq_cqe_comp_en=1` |
 | 反射端 `--rx-split` | 在上面的基础上加 `dv_flow_en=2` |
 
-- **多包接收（`mprq_en=1`）**：多流时发送端要以几十 Mpps 收小的写响应，必须开。单流收的是 500 多字节的大包，开了反而慢（约 5%）。
-- **CQE 压缩（`rxq_cqe_comp_en`）**：多流高包率时必须开，关掉时单卡约 46 Mpps 就开始丢包；单流或总包率低、要低时延时关掉，满载 RTT 约低 2~3.5 µs。
+- **多包接收（`mprq_en=1`）**：多流时发送端要以几十 Mpps 收小的写响应，必须开。单流收的是 500 多字节的大包，开了反而略慢。
+- **CQE 压缩（`rxq_cqe_comp_en`）**：多流高包率时必须开，关掉时高包率下会丢包（`miss` 增长）；单流或总包率低、要低时延时关掉，满载 RTT 更低。
 - **发送内联**：每口发送队列少于 8 个时 mlx5 默认不内联，要加 `txqs_min_inline=1`；`txq_inline_mpw=128` 只内联 128 字节以下的小包。
 - `ethtool` 的 `rx_cqe_compress` 和 `mlxconfig` 的 `CQE_COMPRESSION` 都管不到 DPDK 侧的 CQE 压缩，只能用 devargs。
 
 ### 11.2 核和流
 
-- 单条流的事务率上限约 22~24M/s（一个接收核的上限），要更高的吞吐就加流。
+- 单条流的事务率受一个接收核限制，到上限后（busyR% 接近 100%）要更高的吞吐就加流。
 - 发送端单流包率被发送核限制时，用 `--tx-cores 2`。
 - 收发核用隔离核、和网卡同一 NUMA；同一物理核的两个超线程不要都分给高负载的核。
 - 多流时 `--burst 16` 通常比默认 32 好；反射端 `--rx-split` 高包率时 `--rxd 4096`。
