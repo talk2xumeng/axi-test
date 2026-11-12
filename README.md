@@ -36,25 +36,31 @@ src/
 ## 编译
 
 ```bash
-# 使用 DOCA 自带的 DPDK（/opt/mellanox/dpdk，22.11.2410），pkg-config 可直接找到
+# 默认在 /opt/dpdk-24.11 找 DPDK（可用 DPDK_ROOT= 覆盖），不检查版本
 make
 # 若运行时报找不到 .so：
-echo /opt/mellanox/dpdk/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf && ldconfig
+echo /opt/dpdk-24.11/lib/x86_64-linux-gnu > /etc/ld.so.conf.d/dpdk.conf
+echo /opt/rdma-core-50/lib > /etc/ld.so.conf.d/rdma-core.conf
+ldconfig
 ```
 
 ### 单文件发布构建
 
 ```bash
+# 首次构建固定工具链；PREFIX 必须是当前用户可写目录
+sudo env PREFIX=/opt/axi-toolchain bash scripts/build-static-toolchain.sh
+
 # 产出 axiperf-static，并检查它确实是不依赖共享库的静态 ELF
-make static
+make static \
+  DPDK_ROOT=/opt/axi-toolchain/dpdk-24.11.4 \
+  RDMA_ROOT=/opt/axi-toolchain/rdma-core-50.0
 file axiperf-static
 ```
 
-`make static` 使用 `pkg-config --static libdpdk`，因此构建机必须同时安装版本匹配的
-DPDK、rdma-core（`libibverbs` / `libmlx5`）、libnuma 等静态库。运行机器仍需 mlx5
+工具链脚本按提交 SHA 固定 DPDK 24.11.4 和 rdma-core 50.0；rdma-core 使用
+`ENABLE_STATIC=1` 生成静态 provider，DPDK 仅构建 mlx5 并使用 `ibverbs_link=static`。
+`make static` 会拒绝其它 DPDK / rdma-core 版本（普通 `make` 不检查）。运行机器仍需 mlx5
 内核驱动、已绑定的网卡和 hugepages，这些属于内核/硬件运行环境，不能打进 bin。
-若静态 rdma-core 与 DPDK 构建时使用的版本不一致，链接会因缺少 `mlx5dv_*` 或
-`ibv_*` 符号而失败；应统一构建工具链版本，不要用动态库掩盖该问题。
 
 ## 运行：eth 头（单个 400G 口，多条流以 MAC 区分）
 
